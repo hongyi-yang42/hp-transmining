@@ -183,6 +183,7 @@ def cmd_align(args: argparse.Namespace) -> int:
         embed_cache_dir=_embeddings_dir(),
         vecalign_dir=Path("vendor/vecalign") if Path("vendor/vecalign").exists() else None,
         top_k_paragraphs=args.top_k,
+        model_name=args.model,
     )
     alignments = align_segments(en, zh, config)
     out = Path(args.output) / "hp1_en_zh_ch01.jsonl"
@@ -249,6 +250,11 @@ def main(argv: list[str] | None = None) -> int:
     p_align.add_argument("--zh", required=True, help="Path to segmented ZH JSONL")
     p_align.add_argument("--output", required=True, help="Output directory")
     p_align.add_argument("--top-k", type=int, default=3)
+    p_align.add_argument(
+        "--model",
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        help="sentence-transformers model name (use 'LaBSE' for higher quality, ~1.8 GB)",
+    )
     p_align.set_defaults(func=cmd_align)
 
     p_run = sub.add_parser("run", help="Render → OCR → clean → segment for one config")

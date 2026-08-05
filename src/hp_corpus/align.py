@@ -37,6 +37,7 @@ class AlignmentConfig:
     vecalign_dir: Path | None = None  # reserved for future subprocess use; currently unused
     top_k_paragraphs: int = DEFAULT_TOP_K_PARAGRAPHS
     manual_threshold: float = MANUAL_CONFIDENCE_THRESHOLD
+    model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 
 def load_segments(path: str | Path) -> list[Segment]:
@@ -49,13 +50,25 @@ def load_segments(path: str | Path) -> list[Segment]:
     return out
 
 
+def _cache_key(lang: str, model_name: str) -> str:
+    """Embedding cache key scoped by language + model so swapping models does
+    not silently reuse stale vectors."""
+    slug = model_name.replace("/", "_").replace("-", "_").replace(".", "_").lower()
+    return f"{lang}_{slug}"
+
+
 def embed_sentences(
     sentences: list[str],
     cache_key: str,
     cache_dir: str | Path,
-    model_name: str = "LaBSE",
+    model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
 ) -> np.ndarray:
-    """Embed sentences with LaBSE; cache to disk."""
+    """Embed sentences with the configured sentence-transformers model; cache to disk.
+
+    Default is the multilingual MiniLM (~470 MB, 384-dim) which is dramatically
+    smaller than LaBSE (~1.8 GB) and adequate for first-pass alignment. Override
+    via AlignmentConfig.model_name to use LaBSE or any other sentence-transformer.
+    """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache = cache_dir / f"{cache_key}.npy"
@@ -212,8 +225,18 @@ def align_segments(
     en_paras = _paragraph_group(en)
     zh_paras = _paragraph_group(zh)
 
-    en_vecs = embed_sentences([s.text for s in en], "en", config.embed_cache_dir)
-    zh_vecs = embed_sentences([s.text for s in zh], "zh", config.embed_cache_dir)
+    en_vecs = embed_sentences(
+        [s.text for s in en],
+        _cache_key("en", config.model_name),
+        config.embed_cache_dir,
+        config.model_name,
+    )
+    zh_vecs = embed_sentences(
+        [s.text for s in zh],
+        _cache_key("zh", config.model_name),
+        config.embed_cache_dir,
+        config.model_name,
+    )
 
     en_offset: list[int] = []
     acc = 0
