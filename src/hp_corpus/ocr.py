@@ -18,31 +18,67 @@ _console = Console()
 
 
 def _make_paddleocr(lang: str):
-    """Construct a PaddleOCR instance. Imported lazily so unit tests don't require it."""
+    """Construct a PaddleOCR instance. Imported lazily so unit tests don't require it.
+
+    PaddleOCR 3.x dropped ``use_angle_cls`` and ``show_log``; the modern equivalent
+    is ``use_textline_orientation``. We also disable the doc-preprocessor
+    (orientation classify + unwarping) since our scans are already upright.
+    """
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
-    return PaddleOCR(lang=lang, use_angle_cls=True, show_log=False)
+    return PaddleOCR(
+        lang=lang,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=True,
+    )
+
+
+def _poly_to_bbox(poly) -> list[float]:
+    """Convert a PaddleOCR polygon (nx2 array/list of [x, y]) to [x0, y0, x1, y1]."""
+    if poly is None:
+        return [0.0, 0.0, 0.0, 0.0]
+    try:
+        # PaddleOCR 3.x returns numpy arrays.
+        arr = __import__("numpy").asarray(poly)
+        if arr.size == 0:
+            return [0.0, 0.0, 0.0, 0.0]
+        xs = arr[:, 0]
+        ys = arr[:, 1]
+        return [float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())]
+    except Exception:  # noqa: BLE001 — fall back to flat-list interpretation
+        if len(poly) == 0:
+            return [0.0, 0.0, 0.0, 0.0]
+        if len(poly) == 4 and not hasattr(poly[0], "__len__"):
+            return [float(c) for c in poly]
+        xs = [pt[0] for pt in poly]
+        ys = [pt[1] for pt in poly]
+        return [float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))]
 
 
 def ocr_image(paddle_instance, image_path: str | Path, page: int) -> list[OCRBlock]:
-    """Run PaddleOCR on one image; return OCRBlocks with bbox + confidence."""
-    result = paddle_instance.ocr(str(image_path), cls=True)
+    """Run PaddleOCR on one image; return OCRBlocks with bbox + confidence.
+
+    Handles PaddleOCR 3.x: ``result[0]`` is an OCRResult dict-like with
+    ``rec_texts``, ``rec_scores``, ``rec_polys``.
+    """
+    result = paddle_instance.predict(str(image_path))
+    if not result:
+        return []
+    page_result = result[0]
+    texts = list(page_result.get("rec_texts", []) or [])
+    scores = list(page_result.get("rec_scores", []) or [])
+    polys = list(page_result.get("rec_polys", []) or [])
+
     blocks: list[OCRBlock] = []
-    # PaddleOCR returns [[line, [(bbox, (text, conf))], ...]] — version-dependent shape.
-    raw = result[0] if result and isinstance(result, list) else []
-    for block_idx, entry in enumerate(raw):
-        if entry is None:
-            continue
-        bbox, (text, conf) = entry
+    for block_idx, (text, score, poly) in enumerate(zip(texts, scores, polys, strict=False)):
         blocks.append(
             OCRBlock(
                 page=page,
                 block_idx=block_idx,
-                text=text,
-                bbox=[float(c) for c in bbox[0] if c is not None][:4]
-                if isinstance(bbox, list) and bbox and isinstance(bbox[0], list)
-                else [float(c) for c in bbox][:4],
-                confidence=float(conf),
+                text=str(text),
+                bbox=_poly_to_bbox(poly),
+                confidence=float(score),
                 engine="paddleocr",
             )
         )
@@ -125,7 +161,8 @@ def print_confidence_table(blocks: list[OCRBlock], label: str) -> None:
 def run_ocr(config: dict[str, Any], pages_dir: str | Path) -> list[OCRBlock]:
     """Dispatch OCR based on config. Uses pre-rendered PNGs for paddleocr."""
     engine = config["ocr"]["engine"]
-    lang = config["ocr"]["lang"]
+    ocr_lang = config["ocr"]["lang"]  # PaddleOCR's lang code (e.g. "ch")
+    book_lang = config["lang"]  # top-level lang code used in filenames (e.g. "zh")
     start = config["chapter"]["start_page"]
     end = config["chapter"]["end_page"]
     pdf_path = config["pdf_path"]
@@ -135,8 +172,8 @@ def run_ocr(config: dict[str, Any], pages_dir: str | Path) -> list[OCRBlock]:
 
     if engine == "paddleocr":
         return ocr_pages_paddleocr(
-            _select_page_images(pages_dir, config["book"], lang, start, end),
-            lang,
+            _select_page_images(pages_dir, config["book"], book_lang, start, end),
+            ocr_lang,
         )
 
     if engine == "auto":
@@ -147,8 +184,8 @@ def run_ocr(config: dict[str, Any], pages_dir: str | Path) -> list[OCRBlock]:
                 ocr_pdf_text_layer(pdf_path, start, end)
                 if has_text_layer(doc)
                 else ocr_pages_paddleocr(
-                    _select_page_images(pages_dir, config["book"], lang, start, end),
-                    lang,
+                    _select_page_images(pages_dir, config["book"], book_lang, start, end),
+                    ocr_lang,
                 )
             )
 
