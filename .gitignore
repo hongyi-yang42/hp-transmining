@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Environment
+.env
+.env.local
+
+# Data — all stages gitignored (raw PDFs, page PNGs, OCR JSONL, cleaned text, segmented, aligned, embeddings)
+data/
+
+# Models, vendor, artifacts, scratch
+models/
+vendor/
+artifacts/
+tmp/
+
+# Copyright-bound file types (defense in depth)
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.epub
+*.npy
+*.pkl
+
+# Caches
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

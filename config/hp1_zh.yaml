@@ -1,0 +1,47 @@
+book: hp1
+lang: zh
+
+# Source PDF — People's Literature Publishing House, Su Nong translation, 2018 23rd printing
+pdf_path: data/raw/hp1_zh.pdf
+expected_sha256: d2ab2782f53d2d26f692a83dc2e14b76b22d1eda8367eb9c0afd4d3e6fc7428d
+total_pages: 93
+has_text_layer: false
+
+# Bibliographic metadata
+title: "哈利·波特与魔法石"
+author: "J.K. 罗琳"
+translator: "苏农"
+publisher: "人民文学出版社"
+edition: "2018年第23次印刷"
+year: 2018
+isbn: "978-7-02-010329-4"
+
+# Chapter 1 page range (1-indexed, inclusive)
+chapter:
+  number: 1
+  start_page: 7
+  end_page: 18
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: paddleocr  # Image-only scan; needs OCR
+  lang: ch
+  model: PP-OCRv5
+
+clean:
+  header_patterns:
+    - "哈利·波特与魔法石"
+    - "第一章 大难不死的男孩"
+  remove_page_numbers: true
+  footnote_markers: ["①", "②", "③", "④", "⑤"]
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['“', '”']
+
+segment:
+  lang: zh
+  split_on: ['。', '！', '？', '；']
+  preserve_ellipsis: true

@@ -1,0 +1,70 @@
+"""Shared test fixtures. All fixtures use synthetic, non-novel text."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+
+@pytest.fixture
+def tmp_repo(tmp_path: Path) -> Path:
+    """Provide a clean working directory under tmp_path."""
+    return tmp_path
+
+
+@pytest.fixture
+def en_config() -> dict:
+    return {
+        "book": "hp1",
+        "lang": "en",
+        "chapter": {"number": 1, "start_page": 1, "end_page": 2},
+        "ocr": {"engine": "pymupdf", "lang": "en"},
+        "clean": {
+            "header_patterns": ["Harry Potter", "THE BOY WHO LIVED"],
+            "remove_page_numbers": True,
+            "merge_line_breaks": True,
+            "paragraph_detection": {"indent_threshold": 2, "dialogue_markers": ['"', '"']},
+        },
+        "segment": {
+            "lang": "en",
+            "split_on": [".", "!", "?"],
+            "abbreviations": ["Mr.", "Mrs.", "Dr.", "St.", "etc.", "Prof."],
+        },
+    }
+
+
+@pytest.fixture
+def zh_config() -> dict:
+    return {
+        "book": "hp1",
+        "lang": "zh",
+        "chapter": {"number": 1, "start_page": 1, "end_page": 2},
+        "ocr": {"engine": "paddleocr", "lang": "ch"},
+        "clean": {
+            "header_patterns": ["哈利·波特与魔法石", "第一章 大难不死的男孩"],
+            "remove_page_numbers": True,
+            "footnote_markers": ["①", "②", "③", "④", "⑤"],
+            "merge_line_breaks": True,
+            "paragraph_detection": {"indent_threshold": 2, "dialogue_markers": ['"', '"']},
+        },
+        "segment": {
+            "lang": "zh",
+            "split_on": ["。", "！", "？", "；"],
+            "preserve_ellipsis": True,
+        },
+    }
+
+
+@pytest.fixture
+def write_yaml(tmp_path: Path):
+    """Helper: write a config dict to a YAML file and return its path."""
+
+    def _write(name: str, data: dict) -> Path:
+        p = tmp_path / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+        return p
+
+    return _write

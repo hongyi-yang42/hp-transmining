@@ -1,0 +1,44 @@
+book: hp1
+lang: en
+
+# Source PDF — Scholastic First American Edition, October 1998
+pdf_path: data/raw/hp1_en.pdf
+expected_sha256: f1009a6d82c9fa33929eda3f95343273fd6be0c0fe6f540be243470735beefa6
+total_pages: 327
+has_text_layer: true
+
+# Bibliographic metadata
+title: "Harry Potter and the Sorcerer's Stone"
+author: "J.K. Rowling"
+publisher: "Scholastic"
+edition: "First American Edition"
+year: 1998
+isbn: "0-590-35340-3"
+
+# Chapter 1 page range (1-indexed, inclusive)
+chapter:
+  number: 1
+  start_page: 13
+  end_page: 29
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: pymupdf  # English PDF has a usable text layer
+  lang: en
+
+clean:
+  header_patterns:
+    - "Harry Potter"
+    - "THE BOY WHO LIVED"
+  remove_page_numbers: true
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['"', '"']
+
+segment:
+  lang: en
+  split_on: ['.', '!', '?']
+  abbreviations: ['Mr.', 'Mrs.', 'Dr.', 'St.', 'etc.', 'Prof.']
