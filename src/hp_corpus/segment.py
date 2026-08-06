@@ -94,12 +94,15 @@ def _has_cjk(text: str) -> bool:
 
 def _split_en(text: str, abbreviations: list[str]) -> list[str]:
     """Split English on . ! ? followed by space or end. Preserves abbreviations
-    and mid-sentence ellipsis (...)."""
+    and mid-sentence ellipsis (..., …, and spaced . . .)."""
     if not text.strip():
         return []
     masked = text
     placeholders: list[tuple[str, str]] = []
-    # Ellipsis first (longer run wins).
+    # Spaced ellipsis first: ". . ." or ". . . ." — common in this edition.
+    # Collapse to a single "…" before the regular ellipsis mask picks it up.
+    masked = re.sub(r"(\.\s+){2,}\.", "…", masked)
+    # Ellipsis (longer run wins).
     for needle in ("...", "…"):
         if needle in masked:
             ph = f"\x00ELLIPSIS{len(placeholders)}\x00"

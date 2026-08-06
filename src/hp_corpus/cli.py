@@ -251,8 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     p_align.add_argument("--output", required=True, help="Output directory")
     p_align.add_argument(
         "--model",
-        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        help="sentence-transformers model name (use 'LaBSE' for higher quality, ~1.8 GB)",
+        default="intfloat/multilingual-e5-base",
+        help="sentence-transformers model name (default: e5-base ~1.1GB; "
+             "fallback: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 ~470MB)",
     )
     p_align.add_argument(
         "--band",
