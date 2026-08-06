@@ -184,6 +184,8 @@ def cmd_align(args: argparse.Namespace) -> int:
         vecalign_dir=Path("vendor/vecalign") if Path("vendor/vecalign").exists() else None,
         top_k_paragraphs=args.top_k,
         model_name=args.model,
+        locality_band=args.band,
+        strategy=args.strategy,
     )
     alignments = align_segments(en, zh, config)
     out = Path(args.output) / "hp1_en_zh_ch01.jsonl"
@@ -254,6 +256,18 @@ def main(argv: list[str] | None = None) -> int:
         "--model",
         default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         help="sentence-transformers model name (use 'LaBSE' for higher quality, ~1.8 GB)",
+    )
+    p_align.add_argument(
+        "--band",
+        type=float,
+        default=0.15,
+        help="Diagonal-band width for global DP (fraction of length). 0.15 = ±15%% drift.",
+    )
+    p_align.add_argument(
+        "--strategy",
+        choices=["global", "per_paragraph"],
+        default="global",
+        help="global (default, with diagonal band) or per_paragraph (legacy, top-K).",
     )
     p_align.set_defaults(func=cmd_align)
 
