@@ -32,6 +32,7 @@ clean:
   header_patterns:
     - "Harry Potter"
     - "THE BOY WHO LIVED"
+    - "CHAPTER ONE"
   remove_page_numbers: true
   merge_line_breaks: true
   paragraph_detection:

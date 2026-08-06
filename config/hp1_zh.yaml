@@ -35,6 +35,11 @@ clean:
     - "哈利·波特与魔法石"
     - "第一章 大难不死的男孩"
   remove_page_numbers: true
+  # PaddleOCR occasionally emits stray detections at extreme bbox positions
+  # or with low confidence; the 8 garbage blocks observed in Chapter 1 all
+  # scored 0.34-0.45, so 0.5 cleanly removes them without losing real text
+  # (next-lowest real block is ~0.6).
+  min_confidence: 0.5
   footnote_markers: ["①", "②", "③", "④", "⑤"]
   merge_line_breaks: true
   paragraph_detection:

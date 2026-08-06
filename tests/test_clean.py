@@ -153,3 +153,82 @@ def test_zh_paragraph_rejoin_across_pages(zh_config) -> None:
     result = clean_blocks(blocks, cfg)
     assert len(result.sentences) == 1
     assert result.sentences[0].source_pages == [1, 2]
+
+
+def test_strips_header_with_internal_double_spaces(en_config) -> None:
+    """Running headers in the Scholastic edition use double-space typography
+    ('THE  BOY  WHO  LIVED'). Whitespace-normalized match should catch them."""
+    cfg = {**en_config, "chapter": {"number": 1, "start_page": 1, "end_page": 2}}
+    blocks = [
+        _blk(1, 0, "THE BOY WHO LIVED"),  # establishes chapter_title
+        _blk(1, 1, "First body sentence."),
+        _blk(2, 0, "THE  BOY  WHO  LIVED"),  # double-spaced variant
+        _blk(2, 1, "Second body sentence."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    texts = [s.text for s in result.sentences]
+    assert texts == ["First body sentence.", "Second body sentence."]
+
+
+def test_strips_letter_spaced_chapter_header(en_config) -> None:
+    """Chapter title rendered as 'C H A P T E R  O N E' (letter-spaced
+    typography) should match the 'CHAPTER ONE' pattern after whitespace
+    normalization."""
+    cfg = {**en_config, "chapter": {"number": 1, "start_page": 1, "end_page": 1}}
+    cfg["clean"] = {**cfg["clean"], "header_patterns": ["CHAPTER ONE"]}
+    blocks = [
+        _blk(1, 0, "C H A P T E R  O N E"),
+        _blk(1, 1, "CHAPTER  ONE"),  # different typography, same header
+        _blk(1, 2, "Body paragraph."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    texts = [s.text for s in result.sentences]
+    assert texts == ["Body paragraph."]
+
+
+def test_strips_control_chars_around_page_number(en_config) -> None:
+    """PyMuPDF sometimes wraps page numbers in private-use markers
+    ('\\x91 17 \\x91'). Control-char stripping lets the page-number regex
+    still match."""
+    cfg = en_config
+    blocks = [
+        _blk(1, 0, "\x91 13 \x91"),
+        _blk(1, 1, "Body text follows."),
+        _blk(2, 0, "\x91 14 \x91"),
+        _blk(2, 1, "More body."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    texts = [s.text for s in result.sentences]
+    assert all("13" not in s.split() and "14" not in s.split() for s in texts)
+    assert all("\x91" not in s for s in texts)
+
+
+def test_drops_single_letter_block(en_config) -> None:
+    """A standalone single-letter block (drop cap extracted as its own block)
+    should be dropped — otherwise it would prepend to the wrong paragraph."""
+    cfg = en_config
+    blocks = [
+        _blk(1, 0, "Previous paragraph ends."),
+        _blk(1, 1, "M"),  # drop-cap fragment
+        _blk(1, 2, "Next paragraph starts."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    texts = [s.text for s in result.sentences]
+    # "M" should not appear as a standalone paragraph or be prepended
+    assert all(not s.startswith("M ") for s in texts)
+    assert all(s != "M" for s in texts)
+
+
+def test_zh_min_confidence_filter(zh_config) -> None:
+    """Low-confidence PaddleOCR blocks (garbage characters) should be dropped
+    when min_confidence is set."""
+    cfg = {**zh_config, "clean": {**zh_config.get("clean", {}), "min_confidence": 0.5}}
+    blocks = [
+        _blk(1, 0, "正常中文句子。", conf=0.95),
+        _blk(1, 1, "里房机局品济和", conf=0.42),  # garbage below threshold
+        _blk(1, 2, "另一段正文。", conf=0.91),
+    ]
+    result = clean_blocks(blocks, cfg)
+    texts = [s.text for s in result.sentences]
+    assert all("里房机局" not in s for s in texts)
+    assert any("正常中文" in s for s in texts)

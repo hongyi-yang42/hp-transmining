@@ -55,6 +55,10 @@ class CleanResult:
 
 
 def _strip_block_text(text: str) -> str:
+    # Drop C0/C1 control chars — PyMuPDF sometimes wraps page numbers in
+    # private-use markers like "\x91 17 \x91" as decorative side flourishes.
+    # Without this, the page-number regex sees "\x9117\x91" and misses it.
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", text)
     return text.replace(" ", " ").strip()
 
 
@@ -128,9 +132,18 @@ def clean_blocks(
             footnotes.append(b.model_copy(update={"text": text}))
             continue
 
-        # Header strip — exact match only. Substring match would over-match
-        # (e.g. "Harry Potter" appears constantly in body text).
-        matched_pat = next((pat for pat in header_patterns if text == pat), None)
+        # Header strip — exact match, with a whitespace-insensitive fallback
+        # so typography variants like "THE  BOY  WHO  LIVED" (double-spaced
+        # running header) and "C H A P T E R  O N E" (letter-spaced chapter
+        # title) still match their normal-space pattern.
+        matched_pat = next(
+            (
+                pat
+                for pat in header_patterns
+                if text == pat or text.replace(" ", "") == pat.replace(" ", "")
+            ),
+            None,
+        )
         if matched_pat is not None:
             if matched_pat not in seen_headers:
                 seen_headers.add(matched_pat)
@@ -144,6 +157,12 @@ def clean_blocks(
 
         # Decorative
         if _is_decorative(text):
+            continue
+
+        # Single-char alphabetic blocks — PyMuPDF sometimes emits a decorative
+        # drop cap as its own block (e.g. "M " for the M in "Mr."). Downstream
+        # assembly would then prepend it to the wrong paragraph. Drop it.
+        if len(text) == 1 and text.isalpha():
             continue
 
         kept.append(b.model_copy(update={"text": text}))
@@ -184,7 +203,8 @@ def _drop_bbox_outliers(blocks: list[OCRBlock]) -> list[OCRBlock]:
         if xs:
             medians[page] = sorted(xs)[len(xs) // 2]
     return [
-        b for b in blocks
+        b
+        for b in blocks
         if b.page not in medians
         or not (len(b.bbox) >= 4 and b.bbox[2] > b.bbox[0] > 0)
         or b.bbox[0] <= 3.0 * medians[b.page]

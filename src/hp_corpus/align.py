@@ -198,10 +198,14 @@ def _global_dp_align(
 
             # 2:2 — two en, two zh (rare but occurs in dialogue-heavy passages)
             if i >= 2 and j >= 2 and dp[i - 2, j - 2] > NEG:
-                s = float(max(
-                    sims[i - 2, j - 2], sims[i - 2, j - 1],
-                    sims[i - 1, j - 2], sims[i - 1, j - 1],
-                ))
+                s = float(
+                    max(
+                        sims[i - 2, j - 2],
+                        sims[i - 2, j - 1],
+                        sims[i - 1, j - 2],
+                        sims[i - 1, j - 1],
+                    )
+                )
                 if s >= SIMILARITY_FLOOR:
                     cand = dp[i - 2, j - 2] + s * 0.92
                     if cand > best:
