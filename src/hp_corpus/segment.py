@@ -79,7 +79,14 @@ def _split_zh(text: str, preserve_ellipsis: bool = True) -> list[str]:
         # The flag exists for symmetry with config and future tuning.
         pass
 
-    return [s for s in out if s]
+    # Skip fragments that contain no CJK chars (e.g. lone "X" OCR noise or
+    # standalone closing quote). Downstream alignment can't use them.
+    return [s for s in out if s and _has_cjk(s)]
+
+
+def _has_cjk(text: str) -> bool:
+    """True iff text contains at least one CJK Unified Ideograph character."""
+    return any("一" <= ch <= "鿿" for ch in text)
 
 
 def _split_en(text: str, abbreviations: list[str]) -> list[str]:
@@ -110,6 +117,11 @@ def _split_en(text: str, abbreviations: list[str]) -> list[str]:
             continue
         for ph, needle in placeholders:
             p = p.replace(ph, needle)
+        p = p.strip()
+        # Skip fragments that are only punctuation/whitespace (e.g. lone ".").
+        # These would otherwise pollute downstream alignment as 1-char segments.
+        if not any(c.isalnum() for c in p):
+            continue
         out.append(p)
     return out
 

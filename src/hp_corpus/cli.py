@@ -182,10 +182,8 @@ def cmd_align(args: argparse.Namespace) -> int:
     config = AlignmentConfig(
         embed_cache_dir=_embeddings_dir(),
         vecalign_dir=Path("vendor/vecalign") if Path("vendor/vecalign").exists() else None,
-        top_k_paragraphs=args.top_k,
         model_name=args.model,
         locality_band=args.band,
-        strategy=args.strategy,
     )
     alignments = align_segments(en, zh, config)
     out = Path(args.output) / "hp1_en_zh_ch01.jsonl"
@@ -251,7 +249,6 @@ def main(argv: list[str] | None = None) -> int:
     p_align.add_argument("--en", required=True, help="Path to segmented EN JSONL")
     p_align.add_argument("--zh", required=True, help="Path to segmented ZH JSONL")
     p_align.add_argument("--output", required=True, help="Output directory")
-    p_align.add_argument("--top-k", type=int, default=3)
     p_align.add_argument(
         "--model",
         default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -262,12 +259,6 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.15,
         help="Diagonal-band width for global DP (fraction of length). 0.15 = ±15%% drift.",
-    )
-    p_align.add_argument(
-        "--strategy",
-        choices=["global", "per_paragraph"],
-        default="global",
-        help="global (default, with diagonal band) or per_paragraph (legacy, top-K).",
     )
     p_align.set_defaults(func=cmd_align)
 
