@@ -39,10 +39,12 @@ _DECORATIVE = {"*", "·", "•", "◇", "◆", "■", "□", "★", "☆", "✦"
 _FOOTNOTE_RE = re.compile(r"^[①②③④⑤⑥⑦⑧⑨⑩]")
 _PURE_DIGITS_RE = re.compile(r"^\d{1,4}$")
 
-# A block is "indented" if its bbox x0 exceeds the page's left margin by this
-# many pixels (relative). Tuned for 300-DPI page renders where a paragraph
-# first-line indent is ~20–30px.
-_INDENT_X_THRESHOLD_PX = 15
+# A block is "indented" if its bbox x0 exceeds the page's body-text cluster
+# by a meaningful margin. PaddleOCR's body-text x0 has ~30px jitter on a
+# 300-DPI render, and real paragraph first-line indents sit ~90–110px right
+# of body. We use gap-based adaptive detection (see _indent_threshold);
+# this constant is only a fallback when the gap analysis fails.
+_INDENT_X_FALLBACK_PX = 50
 
 
 @dataclass
@@ -190,7 +192,7 @@ def _drop_bbox_outliers(blocks: list[OCRBlock]) -> list[OCRBlock]:
 
 
 def _page_left_margins(blocks: list[OCRBlock]) -> dict[int, float]:
-    """Per-page standard left margin = 10th-percentile of block x0.
+    """Per-page body-text left margin = 10th-percentile of block x0.
 
     Using p10 (rather than min) is robust to a few stray outer-margin blocks
     like page numbers or running titles that may sit further left than body
@@ -211,13 +213,57 @@ def _page_left_margins(blocks: list[OCRBlock]) -> dict[int, float]:
     return margins
 
 
-def _is_indented(block: OCRBlock, page_margin: float | None) -> bool:
-    """True iff this block's left edge is noticeably indented relative to the
-    page's standard margin. Falls back to leading-whitespace detection when
-    bbox is unavailable or unusable (e.g. text-layer blocks with [0,0,0,0]).
+def _indent_thresholds(blocks: list[OCRBlock]) -> dict[int, float]:
+    """Per-page adaptive indent threshold via largest-gap analysis.
+
+    For each page, sort the unique x0 values and find the largest gap among
+    the lower 80% (body cluster). The midpoint of that gap is the natural
+    separator between body-text jitter and real paragraph indents. Falls
+    back to ``margin + _INDENT_X_FALLBACK_PX`` when no gap ≥ 30px exists
+    (page has no clear indent cluster, e.g. title pages).
     """
-    if page_margin is not None and len(block.bbox) >= 4 and block.bbox[2] > block.bbox[0] > 0:
-        return float(block.bbox[0]) > page_margin + _INDENT_X_THRESHOLD_PX
+    margins = _page_left_margins(blocks)
+    by_page: dict[int, list[float]] = defaultdict(list)
+    for b in blocks:
+        if len(b.bbox) >= 4 and b.bbox[2] > b.bbox[0] > 0:
+            by_page[b.page].append(float(b.bbox[0]))
+
+    thresholds: dict[int, float] = {}
+    for page, xs in by_page.items():
+        margin = margins.get(page)
+        if margin is None:
+            continue
+        unique = sorted(set(xs))
+        # Restrict to x0 values not too far from body (within 2x margin) so
+        # far outliers don't pollute the gap analysis.
+        body_cluster = [x for x in unique if x <= 2.5 * margin]
+        if len(body_cluster) < 2:
+            thresholds[page] = margin + _INDENT_X_FALLBACK_PX
+            continue
+        # Find largest gap between consecutive body-cluster values
+        max_gap = 0.0
+        gap_start = 0.0
+        for i in range(len(body_cluster) - 1):
+            g = body_cluster[i + 1] - body_cluster[i]
+            if g > max_gap:
+                max_gap = g
+                gap_start = body_cluster[i]
+        if max_gap >= 30.0:
+            # Midpoint of the largest gap is the natural threshold
+            thresholds[page] = gap_start + max_gap / 2
+        else:
+            thresholds[page] = margin + _INDENT_X_FALLBACK_PX
+    return thresholds
+
+
+def _is_indented(block: OCRBlock, threshold: float | None) -> bool:
+    """True iff this block's left edge exceeds the page's indent threshold.
+
+    Falls back to leading-whitespace detection when bbox is unavailable or
+    unusable (e.g. text-layer blocks with [0,0,0,0]).
+    """
+    if threshold is not None and len(block.bbox) >= 4 and block.bbox[2] > block.bbox[0] > 0:
+        return float(block.bbox[0]) > threshold
     # Whitespace fallback — works for English text layer where blocks carry
     # their leading spaces.
     return block.text.startswith("　　") or block.text.startswith("    ")
@@ -248,7 +294,7 @@ def _assemble_paragraphs(
     cur_pages: list[int] = []
 
     open_q = dialogue_markers[0] if dialogue_markers else None
-    margins = _page_left_margins(blocks)
+    indent_thresholds = _indent_thresholds(blocks)
     # English source uses PyMuPDF text layer where each block is typically
     # already a paragraph; terminator signals paragraph end. Chinese source
     # is PaddleOCR line-by-line, so terminator would over-fragment.
@@ -259,11 +305,11 @@ def _assemble_paragraphs(
         if not text:
             continue
 
-        page_margin = margins.get(b.page)
+        threshold = indent_thresholds.get(b.page)
         new_para = False
         if not cur_text:
             new_para = True
-        elif _is_indented(b, page_margin):
+        elif _is_indented(b, threshold):
             new_para = True
         elif open_q and text.startswith(open_q) and _ends_with_terminator(cur_text):
             # New dialogue line: leading quote + previous sentence closed.

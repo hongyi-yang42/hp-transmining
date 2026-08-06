@@ -51,7 +51,7 @@ class Alignment(BaseModel):
     align_id: str = Field(pattern=r"^a\d+$")
     en: list[str] = Field(description="List of English Segment IDs")
     zh: list[str] = Field(description="List of Chinese Segment IDs")
-    type: Literal["1:0", "0:1", "1:1", "1:2", "2:1", "2:2"]
+    type: Literal["1:0", "0:1", "1:1", "1:2", "2:1", "1:3", "3:1", "2:2"]
     confidence: float = Field(ge=0.0, le=1.0)
     method: Literal["vecalign_labse", "manual"]
     validated: bool = False

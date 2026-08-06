@@ -20,7 +20,10 @@ def make_id(book: str, lang: str, chapter: int, paragraph: int, sentence: int) -
 
 
 # Chinese terminators that trigger a sentence split.
-_ZH_SPLIT_CHARS = "。！？；"
+# Note: ；(semicolon) is intentionally NOT a split point — it's rare in
+# narrative (3 occurrences in Chapter 1) and splitting on it produces orphan
+# short clauses. The DP handles these via 1:N alignments.
+_ZH_SPLIT_CHARS = "。！？"
 # Chinese typographic quote pairs (open, close). Includes curly + straight +
 # corner-bracket + angle-bracket variants to be robust across OCR outputs.
 _ZH_QUOTE_PAIRS = (

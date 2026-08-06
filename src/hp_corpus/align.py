@@ -167,6 +167,33 @@ def _global_dp_align(
                     if cand > best:
                         best, best_move = cand, (2, 1, s * 0.95)
 
+            # 1:3 — one en, three zh (translator expanded EN into multiple ZH sentences)
+            if i >= 1 and j >= 3 and dp[i - 1, j - 3] > NEG:
+                s = float(max(sims[i - 1, j - 3], sims[i - 1, j - 2], sims[i - 1, j - 1]))
+                if s >= SIMILARITY_FLOOR:
+                    cand = dp[i - 1, j - 3] + s * 0.90  # larger discount for 3-way merges
+                    if cand > best:
+                        best, best_move = cand, (1, 3, s * 0.90)
+
+            # 3:1 — three en, one zh (translator condensed)
+            if i >= 3 and j >= 1 and dp[i - 3, j - 1] > NEG:
+                s = float(max(sims[i - 3, j - 1], sims[i - 2, j - 1], sims[i - 1, j - 1]))
+                if s >= SIMILARITY_FLOOR:
+                    cand = dp[i - 3, j - 1] + s * 0.90
+                    if cand > best:
+                        best, best_move = cand, (3, 1, s * 0.90)
+
+            # 2:2 — two en, two zh (rare but occurs in dialogue-heavy passages)
+            if i >= 2 and j >= 2 and dp[i - 2, j - 2] > NEG:
+                s = float(max(
+                    sims[i - 2, j - 2], sims[i - 2, j - 1],
+                    sims[i - 1, j - 2], sims[i - 1, j - 1],
+                ))
+                if s >= SIMILARITY_FLOOR:
+                    cand = dp[i - 2, j - 2] + s * 0.92
+                    if cand > best:
+                        best, best_move = cand, (2, 2, s * 0.92)
+
             if best_move is not None:
                 dp[i, j] = best
                 back[i][j] = best_move
