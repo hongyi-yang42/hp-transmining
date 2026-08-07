@@ -215,6 +215,7 @@ def cmd_align(args: argparse.Namespace) -> int:
         vecalign_dir=Path("vendor/vecalign") if Path("vendor/vecalign").exists() else None,
         model_name=args.model,
         locality_band=args.band,
+        force_recompute=args.force_recompute,
     )
     alignments = align_segments(src, tgt, config)
     # Output name derived from input languages: hp1_<src>_<tgt>_ch01.jsonl
@@ -304,6 +305,12 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.15,
         help="Diagonal-band width for global DP (fraction of length). 0.15 = ±15%% drift.",
+    )
+    p_align.add_argument(
+        "--force-recompute",
+        action="store_true",
+        help="Recompute embeddings even if a content-addressed cache file with "
+        "matching digest already exists.",
     )
     p_align.set_defaults(func=cmd_align)
 
