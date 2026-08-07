@@ -136,14 +136,16 @@ def main() -> int:
                 total_uncontracted_matched.extend(matched)
 
     # Combined summary
+    c_pct = 100 * len(total_contracted_matched) / max(1, len(total_contracted))
+    u_pct = 100 * len(total_uncontracted_matched) / max(1, len(total_uncontracted))
     print("\n=== COMBINED Ch.1-3 ===")
     print(
         f"  contracted:   {len(total_contracted_matched):3d} / {len(total_contracted):3d} "
-        f"match FILTER_CONTRACTED_123 ({100*len(total_contracted_matched)/max(1,len(total_contracted)):.0f}%)"
+        f"match FILTER_CONTRACTED_123 ({c_pct:.0f}%)"
     )
     print(
         f"  uncontracted: {len(total_uncontracted_matched):3d} / {len(total_uncontracted):3d} "
-        f"match FILTER_PP ({100*len(total_uncontracted_matched)/max(1,len(total_uncontracted)):.0f}%)"
+        f"match FILTER_PP ({u_pct:.0f}%)"
     )
 
     # Per-prep breakdown for contracted
