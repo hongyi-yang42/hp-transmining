@@ -232,3 +232,56 @@ def test_zh_min_confidence_filter(zh_config) -> None:
     texts = [s.text for s in result.sentences]
     assert all("里房机局" not in s for s in texts)
     assert any("正常中文" in s for s in texts)
+
+
+def test_de_line_join_adds_space(de_config) -> None:
+    """German PaddleOCR is line-by-line; joining two lines without a space
+    produces 'warenstolz'. Lines must be joined with a space."""
+    cfg = de_config
+    blocks = [
+        _blk(1, 0, "Die Dursleys waren"),
+        _blk(1, 1, "stolz darauf,"),  # next line, no terminator on prev
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert len(result.sentences) == 1
+    assert "waren stolz" in result.sentences[0].text
+    assert "warenstolz" not in result.sentences[0].text
+
+
+def test_de_line_join_repairs_hyphenation(de_config) -> None:
+    """German end-of-line hyphenation ('Grun-' + 'nings') should be repaired
+    to 'Grunnings' (de-hyphenation when next char is lowercase)."""
+    cfg = de_config
+    blocks = [
+        _blk(1, 0, "Eine Firma namens Grun-"),
+        _blk(1, 1, "nings"),  # line-wrap hyphenation
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert "Grunnings" in result.sentences[0].text
+    assert "Grun-nings" not in result.sentences[0].text
+
+
+def test_de_preserves_lexical_hyphen(de_config) -> None:
+    """Lexical hyphen in middle of a line ('Wohlfühl-Essen') should not be
+    removed — only end-of-line hyphen + lowercase next line is repaired."""
+    cfg = de_config
+    blocks = [
+        _blk(1, 0, "Er aß das Wohlfühl-Essen."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert "Wohlfühl-Essen" in result.sentences[0].text
+
+
+def test_zh_unaffected_by_de_line_join(zh_config) -> None:
+    """Chinese line joining must remain direct concatenation (no space added)
+    after the German fix introduces the lang-in-(en,de) branch."""
+    cfg = zh_config
+    blocks = [
+        _blk(1, 0, "达斯利先生"),
+        _blk(1, 1, "非常骄傲"),  # next line — no terminator
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert len(result.sentences) == 1
+    # No space inserted between Chinese lines
+    assert "达斯利先生非常骄傲" in result.sentences[0].text
+    assert " " not in result.sentences[0].text

@@ -343,13 +343,18 @@ def _assemble_paragraphs(
             cur_text = ""
             cur_pages = []
 
-        if cur_text and lang == "en":
+        # German PaddleOCR is line-by-line like Chinese, but German is
+        # whitespace-delimited and uses end-of-line hyphenation. Joining
+        # lines without a space produces "warenstolz"; not repairing
+        # hyphen+lowercase leaves "Grun-nings". Chinese needs direct
+        # concatenation (no inter-word space).
+        if cur_text:
             if cur_text.endswith("-") and text and text[0].islower():
                 cur_text = cur_text[:-1] + text
-            else:
+            elif lang in ("en", "de"):
                 cur_text += " " + text
-        elif cur_text:
-            cur_text += text
+            else:
+                cur_text += text
         else:
             cur_text = text
         cur_pages.append(b.page)

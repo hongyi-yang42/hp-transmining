@@ -58,6 +58,27 @@ def zh_config() -> dict:
 
 
 @pytest.fixture
+def de_config() -> dict:
+    return {
+        "book": "hp1",
+        "lang": "de",
+        "chapter": {"number": 1, "start_page": 1, "end_page": 2},
+        "ocr": {"engine": "paddleocr", "lang": "german"},
+        "clean": {
+            "header_patterns": ["Harry Potter", "Ein Junge überlebt"],
+            "remove_page_numbers": True,
+            "merge_line_breaks": True,
+            "paragraph_detection": {"indent_threshold": 2, "dialogue_markers": ["»", "«"]},
+        },
+        "segment": {
+            "lang": "de",
+            "split_on": [".", "!", "?"],
+            "abbreviations": ["Mr.", "Mrs.", "Dr.", "St.", "etc.", "Prof.", "Nr.", "bzw."],
+        },
+    }
+
+
+@pytest.fixture
 def write_yaml(tmp_path: Path):
     """Helper: write a config dict to a YAML file and return its path."""
 
