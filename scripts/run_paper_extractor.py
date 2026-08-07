@@ -1,16 +1,21 @@
-"""Run the paper's PP extractor on our DE CoNLL-U.
+"""Run the paper's PP extractor on DE CoNLL-U files for Ch.1-3.
 
 Uses time-in-translation/conll-extractor's logic verbatim:
 - contracted=True → finds tokens in CONTRACTED list, extracts (prep, noun)
 - contracted=False → finds PREPOSITIONS tokens with same-head ART in
   DETERMINERS (das/dem/der), extracts (prep, det, noun)
 
-Then validates against FILTER_CONTRACTED_123 (the Ch.1-3 subset the paper
-annotated) to see how many of our Ch.1 hits match the paper's data.
+Then validates against FILTER_CONTRACTED_123 / FILTER_PP (the Ch.1-3
+subset the paper annotated) to see how many of our hits match the paper's
+data. Outputs per-chapter TSVs + prints combined stats.
+
+Usage:
+    uv run python scripts/run_paper_extractor.py [--chapters 1 2 3]
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
 import sys
 from pathlib import Path
@@ -31,8 +36,7 @@ POS_NOUN = "NN"
 
 
 def extract(in_file: Path, contracted: bool) -> list[dict]:
-    """Adapted from conll_extractor.prepositions.extract.process_single.
-    Returns list of dicts instead of writing CSV directly."""
+    """Adapted from conll_extractor.prepositions.extract.process_single."""
     out = []
     sentences = pyconll.load_from_file(str(in_file))
     forms = CONTRACTED if contracted else PREPOSITIONS
@@ -79,40 +83,77 @@ def extract(in_file: Path, contracted: bool) -> list[dict]:
 
 
 def validate(hits: list[dict], contracted: bool) -> tuple[int, int, list[dict]]:
-    """Return (matched_count, total_count, matched_hits).
-    For contracted: match against FILTER_CONTRACTED_123 (Ch.1-3 paper set).
-    For uncontracted: match against FILTER_PP."""
+    """Return (matched_count, total_count, matched_hits)."""
     filt = FILTER_CONTRACTED_123 if contracted else FILTER_PP
     matched = [h for h in hits if h["prep"] in filt and h["noun"] in filt[h["prep"]]]
     return len(matched), len(hits), matched
 
 
-def main() -> int:
-    in_file = Path("data/parsed/hp1_de_ch01_nomwt.conllu")
-    out_dir = Path("data/extracted")
-    out_dir.mkdir(parents=True, exist_ok=True)
+def write_tsv(path: Path, hits: list[dict], matched: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        w = csv.writer(f, delimiter="\t", lineterminator="\n")
+        w.writerow(["sentence_id", "prep", "det", "noun", "in_filter"])
+        for h in hits:
+            in_filter = "Y" if h in matched else "N"
+            w.writerow([h["sentence_id"], h["prep"], h["det"] or "-", h["noun"], in_filter])
 
-    for contracted in (True, False):
-        kind = "contracted" if contracted else "uncontracted"
-        hits = extract(in_file, contracted)
-        n_match, n_total, matched = validate(hits, contracted)
-        out_path = out_dir / f"hp1_de_ch01_{kind}.tsv"
-        with open(out_path, "w", encoding="utf-8") as f:
-            w = csv.writer(f, delimiter="\t", lineterminator="\n")
-            w.writerow(["sentence_id", "prep", "det", "noun", "in_filter"])
-            for h in hits:
-                in_filter = "Y" if h in matched else "N"
-                w.writerow([h["sentence_id"], h["prep"], h["det"] or "-", h["noun"], in_filter])
-        filt_name = "FILTER_CONTRACTED_123" if contracted else "FILTER_PP"
-        print(f"{kind}: extracted {n_total} PPs, {n_match} match {filt_name}")
-        print(f"  → {out_path}")
-        if contracted:
-            # Break down which prepositions
-            by_prep = {}
-            for h in matched:
-                by_prep.setdefault(h["prep"], []).append(h["noun"])
-            for p in sorted(by_prep):
-                print(f"    {p}: {len(by_prep[p])} hits — {by_prep[p][:5]}")
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--chapters", type=int, nargs="+", default=[1, 2, 3])
+    args = ap.parse_args()
+
+    parsed_dir = Path("data/parsed")
+    out_dir = Path("data/extracted")
+
+    total_contracted: list[dict] = []
+    total_uncontracted: list[dict] = []
+    total_contracted_matched: list[dict] = []
+    total_uncontracted_matched: list[dict] = []
+
+    for ch in args.chapters:
+        in_file = parsed_dir / f"hp1_de_ch0{ch}_nomwt.conllu"
+        if not in_file.exists():
+            print(f"SKIP Ch.{ch}: {in_file} not found (run normalize_conllu_mwt.py first)")
+            continue
+
+        print(f"\n=== Chapter {ch} ({in_file.name}) ===")
+        for contracted in (True, False):
+            kind = "contracted" if contracted else "uncontracted"
+            hits = extract(in_file, contracted)
+            n_match, n_total, matched = validate(hits, contracted)
+            out_path = out_dir / f"hp1_de_ch0{ch}_{kind}.tsv"
+            write_tsv(out_path, hits, matched)
+            filt_name = "FILTER_CONTRACTED_123" if contracted else "FILTER_PP"
+            print(f"  {kind}: {n_total} extracted, {n_match} match {filt_name} → {out_path.name}")
+
+            if contracted:
+                total_contracted.extend(hits)
+                total_contracted_matched.extend(matched)
+            else:
+                total_uncontracted.extend(hits)
+                total_uncontracted_matched.extend(matched)
+
+    # Combined summary
+    print("\n=== COMBINED Ch.1-3 ===")
+    print(
+        f"  contracted:   {len(total_contracted_matched):3d} / {len(total_contracted):3d} "
+        f"match FILTER_CONTRACTED_123 ({100*len(total_contracted_matched)/max(1,len(total_contracted)):.0f}%)"
+    )
+    print(
+        f"  uncontracted: {len(total_uncontracted_matched):3d} / {len(total_uncontracted):3d} "
+        f"match FILTER_PP ({100*len(total_uncontracted_matched)/max(1,len(total_uncontracted)):.0f}%)"
+    )
+
+    # Per-prep breakdown for contracted
+    by_prep: dict[str, list[str]] = {}
+    for h in total_contracted_matched:
+        by_prep.setdefault(h["prep"], []).append(h["noun"])
+    print("\n  matched contracted PPs by preposition:")
+    for p in sorted(by_prep):
+        print(f"    {p:8s}: {len(by_prep[p]):2d} nouns — {by_prep[p][:6]}")
+
     return 0
 
 

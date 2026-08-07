@@ -1,0 +1,46 @@
+book: hp1
+lang: en
+
+pdf_path: data/raw/hp1_en.pdf
+expected_sha256: f1009a6d82c9fa33929eda3f95343273fd6be0c0fe6f540be243470735beefa6
+total_pages: 327
+has_text_layer: true
+
+title: "Harry Potter and the Sorcerer's Stone"
+author: "J.K. Rowling"
+publisher: "Scholastic"
+edition: "First American Edition"
+year: 1998
+isbn: "0-590-35340-3"
+
+# Chapter 3 page range — "THE LETTERS FROM NO ONE".
+# Verified by scanning text layer: chapter opener on p.43 ("C H A P T E R
+# T H R E E" + "THE LETTERS FROM NO ONE" + "The escape of the Brazilian
+# boa constrictor..."). Ch.4 opens on p.58 with "The Keeper of Keys".
+chapter:
+  number: 3
+  start_page: 43
+  end_page: 57
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: pymupdf
+  lang: en
+
+clean:
+  header_patterns:
+    - "Harry Potter"
+    - "THE LETTERS FROM NO ONE"
+    - "CHAPTER THREE"
+  remove_page_numbers: true
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['"', '"']
+
+segment:
+  lang: en
+  split_on: ['.', '!', '?']
+  abbreviations: ['Mr.', 'Mrs.', 'Dr.', 'St.', 'etc.', 'Prof.']

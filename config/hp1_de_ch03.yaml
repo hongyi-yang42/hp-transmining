@@ -1,0 +1,49 @@
+book: hp1
+lang: de
+
+pdf_path: data/raw/hp1_de.pdf
+expected_sha256: eeefb4df665a9eb24e1000b9023800de2612fd334400c360445715a02d715aac
+total_pages: 340
+has_text_layer: true
+
+title: "Harry Potter und der Stein der Weisen"
+author: "J.K. Rowling"
+translator: "Klaus Fritz"
+publisher: "Carlsen Verlag"
+edition: "September 2013"
+year: 2013
+isbn: "978-3-551-55116-0"
+source: "Internet Archive (Scribe 5.7)"
+
+# Chapter 3 page range — "Briefe von niemandem".
+# Verified via IA Scribe text layer: chapter opener on p.40. Ch.4
+# ("Der Hüter der Schlüssel" / "Der Hiiter der Schliissel" in OCR'd form)
+# opens on p.56, so Ch.3 = pp.40-55.
+chapter:
+  number: 3
+  start_page: 40
+  end_page: 55
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: paddleocr
+  lang: german
+  model: PP-OCRv5
+
+clean:
+  header_patterns:
+    - "Harry Potter"
+    - "Briefe von niemandem"
+  remove_page_numbers: true
+  min_confidence: 0.5
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['»', '«']
+
+segment:
+  lang: de
+  split_on: ['.', '!', '?']
+  abbreviations: ['Mr.', 'Mrs.', 'Dr.', 'St.', 'etc.', 'Prof.', 'Nr.', 'bzw.', 'z.B.', 'd.h.', 'u.a.']

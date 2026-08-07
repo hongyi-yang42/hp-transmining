@@ -1,0 +1,50 @@
+book: hp1
+lang: zh
+
+pdf_path: data/raw/hp1_zh.pdf
+expected_sha256: d2ab2782f53d2d26f69a83dc2e14b76b22d1eda8367eb9c0afd4d3e6fc7428d
+total_pages: 93
+has_text_layer: false
+
+title: "哈利·波特与魔法石"
+author: "J.K. 罗琳"
+translator: "苏农"
+publisher: "人民文学出版社"
+edition: "2018年第23次印刷"
+year: 2018
+isbn: "978-7-02-010329-4"
+
+# Chapter 3 page range — "猫头鹰传书".
+# Verified by OCR'ing candidate pages: Ch.3 opener ("第3章 猫头鹰传书") is
+# on p.29; Ch.4 ("第4章 钥匙保管员") opens on p.41. So Ch.3 = pp.29-40.
+chapter:
+  number: 3
+  start_page: 29
+  end_page: 40
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: paddleocr
+  lang: ch
+  model: PP-OCRv5
+
+clean:
+  header_patterns:
+    - "哈利·波特与魔法石"
+    - "HARRY POTTER"
+    - "第3章 猫头鹰传书"
+    - "第3章猫头鹰传书"
+  remove_page_numbers: true
+  min_confidence: 0.5
+  footnote_markers: ["①", "②", "③", "④", "⑤"]
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['“', '”']
+
+segment:
+  lang: zh
+  split_on: ['。', '！', '？', '；']
+  preserve_ellipsis: true
