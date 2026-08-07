@@ -51,6 +51,17 @@ def test_data_aligned_is_ignored(repo_root: Path) -> None:
     assert _git_check_ignore("data/aligned/hp1_en_zh_ch01.jsonl")
 
 
+def test_data_extracted_is_ignored(repo_root: Path) -> None:
+    """Step 3 output: per-occurrence TSVs with German text + lemma."""
+    assert _git_check_ignore("data/extracted/hp1_de_ch01_contracted.tsv")
+
+
+def test_data_derived_step4_is_ignored(repo_root: Path) -> None:
+    """Step 4 output: candidate JSONL and pilot TSV with DE/EN/ZH novel text."""
+    assert _git_check_ignore("data/derived/step4/ch1_3_pilot_20.tsv")
+    assert _git_check_ignore("data/derived/step4/ch1_3_all_candidates.jsonl")
+
+
 def test_data_embeddings_is_ignored(repo_root: Path) -> None:
     assert _git_check_ignore("data/embeddings/en.npy")
 
