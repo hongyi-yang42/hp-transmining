@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2",
     "pyyaml>=6",
     "rich>=13",
+    "pyconll>=3.2",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +22,9 @@ ocr = [
 align = [
     "sentence-transformers>=3",
     "numpy>=1.26",
+]
+parse = [
+    "stanza>=1.5,<2",
 ]
 dev = [
     "pytest>=8",

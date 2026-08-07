@@ -9,8 +9,13 @@ Then validates against FILTER_CONTRACTED_123 / FILTER_PP (the Ch.1-3
 subset the paper annotated) to see how many of our hits match the paper's
 data. Outputs per-chapter TSVs + prints combined stats.
 
+Stdout carries aggregate counts only — never noun lemmas, forms, or any
+other token-level data from the source text. Per-PP detail goes only to
+the TSV files under --output-dir (gitignored).
+
 Usage:
-    uv run python scripts/run_paper_extractor.py [--chapters 1 2 3]
+    uv run python scripts/run_paper_extractor.py [--chapters 1 2 3] \
+        [--parsed-dir data/parsed] [--output-dir data/extracted]
 """
 
 from __future__ import annotations
@@ -99,13 +104,15 @@ def write_tsv(path: Path, hits: list[dict], matched: list[dict]) -> None:
             w.writerow([h["sentence_id"], h["prep"], h["det"] or "-", h["noun"], in_filter])
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--chapters", type=int, nargs="+", default=[1, 2, 3])
-    args = ap.parse_args()
+    ap.add_argument("--parsed-dir", type=Path, default=Path("data/parsed"))
+    ap.add_argument("--output-dir", type=Path, default=Path("data/extracted"))
+    args = ap.parse_args(argv)
 
-    parsed_dir = Path("data/parsed")
-    out_dir = Path("data/extracted")
+    parsed_dir = args.parsed_dir
+    out_dir = args.output_dir
 
     total_contracted: list[dict] = []
     total_uncontracted: list[dict] = []
@@ -147,14 +154,6 @@ def main() -> int:
         f"  uncontracted: {len(total_uncontracted_matched):3d} / {len(total_uncontracted):3d} "
         f"match FILTER_PP ({u_pct:.0f}%)"
     )
-
-    # Per-prep breakdown for contracted
-    by_prep: dict[str, list[str]] = {}
-    for h in total_contracted_matched:
-        by_prep.setdefault(h["prep"], []).append(h["noun"])
-    print("\n  matched contracted PPs by preposition:")
-    for p in sorted(by_prep):
-        print(f"    {p:8s}: {len(by_prep[p]):2d} nouns — {by_prep[p][:6]}")
 
     return 0
 
