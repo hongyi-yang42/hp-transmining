@@ -32,6 +32,7 @@ from .align import (
 )
 from .clean import clean_blocks, write_clean_outputs
 from .ocr import print_confidence_table, read_jsonl, run_ocr, write_jsonl
+from .parse import parse_segments
 from .render import load_config, render_pdf, validate_source
 from .schema import CleanSentence
 from .segment import segment_all, write_segments_jsonl
@@ -57,6 +58,10 @@ def _text_clean_dir() -> Path:
 
 def _segmented_path(book: str, lang: str, chapter: int) -> Path:
     return _data_root() / "segmented" / f"{book}_{lang}_ch{chapter:02d}.jsonl"
+
+
+def _parsed_path(book: str, lang: str, chapter: int) -> Path:
+    return _data_root() / "parsed" / f"{book}_{lang}_ch{chapter:02d}.conllu"
 
 
 def _aligned_dir() -> Path:
@@ -176,17 +181,44 @@ def cmd_segment(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_parse(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    seg = _segmented_path(cfg["book"], cfg["lang"], cfg["chapter"]["number"])
+    out = _parsed_path(cfg["book"], cfg["lang"], cfg["chapter"]["number"])
+    result = parse_segments(seg, cfg["lang"], out)
+    _console.print(
+        f"parse → {out}  ([cyan]{result['output_sentences']}[/] sentences, "
+        f"[cyan]{result['output_tokens']}[/] tokens, "
+        f"[yellow]{result['n_mwt']}[/] MWT expansions from "
+        f"[cyan]{result['input_segments']}[/] input segments)"
+    )
+    return 0
+
+
+def _lang_from_path(path: str) -> str:
+    """Extract the language code from a segmented-file path like
+    'data/segmented/hp1_en_ch01.jsonl' → 'en'."""
+    import re
+
+    m = re.search(r"_([a-z]{2,3})_ch\d+", path)
+    return m.group(1) if m else "x"
+
+
 def cmd_align(args: argparse.Namespace) -> int:
-    en = load_segments(args.en)
-    zh = load_segments(args.zh)
+    src = load_segments(args.src)
+    tgt = load_segments(args.tgt)
     config = AlignmentConfig(
         embed_cache_dir=_embeddings_dir(),
         vecalign_dir=Path("vendor/vecalign") if Path("vendor/vecalign").exists() else None,
         model_name=args.model,
         locality_band=args.band,
     )
-    alignments = align_segments(en, zh, config)
-    out = Path(args.output) / "hp1_en_zh_ch01.jsonl"
+    alignments = align_segments(src, tgt, config)
+    # Output name derived from input languages: hp1_<src>_<tgt>_ch01.jsonl
+    src_lang = _lang_from_path(args.src)
+    tgt_lang = _lang_from_path(args.tgt)
+    out_name = args.out_name or f"hp1_{src_lang}_{tgt_lang}_ch01.jsonl"
+    out = Path(args.output) / out_name
     write_alignments_jsonl(alignments, out)
     summary = alignment_summary(alignments)
     _console.print(f"align → {out}  ([cyan]{summary['count']}[/] records)")
@@ -245,10 +277,19 @@ def main(argv: list[str] | None = None) -> int:
     p_segment.add_argument("--config", required=True)
     p_segment.set_defaults(func=cmd_segment)
 
-    p_align = sub.add_parser("align", help="EN-ZH alignment")
-    p_align.add_argument("--en", required=True, help="Path to segmented EN JSONL")
-    p_align.add_argument("--zh", required=True, help="Path to segmented ZH JSONL")
+    p_parse = sub.add_parser("parse", help="UD parsing → CoNLL-U (requires Stanza models)")
+    p_parse.add_argument("--config", required=True)
+    p_parse.set_defaults(func=cmd_parse)
+
+    p_align = sub.add_parser("align", help="Sentence-level alignment between two languages")
+    p_align.add_argument("--src", required=True, help="Path to source-language segmented JSONL")
+    p_align.add_argument("--tgt", required=True, help="Path to target-language segmented JSONL")
     p_align.add_argument("--output", required=True, help="Output directory")
+    p_align.add_argument(
+        "--out-name",
+        default=None,
+        help="Output filename (default: hp1_<src>_<tgt>_ch01.jsonl, derived from inputs)",
+    )
     p_align.add_argument(
         "--model",
         default="intfloat/multilingual-e5-base",
