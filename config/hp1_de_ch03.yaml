@@ -13,10 +13,9 @@ publisher: "Carlsen Verlag"
 edition: "September 2013"
 year: 2013
 isbn: "978-3-551-31311-9"
-source: "Internet Archive (Scribe 5.7)"
 
 # Chapter 3 page range — "Briefe von niemandem".
-# Verified via IA Scribe text layer: chapter opener on p.40. Ch.4
+# Verified via the text layer: chapter opener on p.40. Ch.4
 # ("Der Hüter der Schlüssel" / "Der Hiiter der Schliissel" in OCR'd form)
 # opens on p.56, so Ch.3 = pp.40-55.
 chapter:

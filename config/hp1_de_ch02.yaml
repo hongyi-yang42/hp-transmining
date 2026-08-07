@@ -4,7 +4,7 @@ lang: de
 pdf_path: data/raw/hp1_de.pdf
 expected_sha256: eeefb4df665a9eb24e1000b9023800de2612fd334400c360445715a02d715aac
 total_pages: 340
-has_text_layer: true  # IA Scribe text layer present but noisy
+has_text_layer: true  # OCR text layer present but noisy
 
 title: "Harry Potter und der Stein der Weisen"
 author: "J.K. Rowling"
@@ -13,10 +13,9 @@ publisher: "Carlsen Verlag"
 edition: "September 2013"
 year: 2013
 isbn: "978-3-551-31311-9"
-source: "Internet Archive (Scribe 5.7)"
 
 # Chapter 2 page range — "Ein Fenster verschwindet".
-# Verified via IA Scribe text layer: "Ein Fenster verschwindet" appears as
+# Verified via the text layer: "Ein Fenster verschwindet" appears as
 # chapter opener on p.26. Ch.3 ("Briefe von niemandem") opens on p.40,
 # so Ch.2 = pp.26-39.
 chapter:

@@ -1,9 +1,9 @@
 book: hp1
 lang: de
 
-# Source PDF — Internet Archive scan of Carlsen Verlag 2013 edition
-# (translator: Klaus Fritz). IA Scribe OCR text layer exists but is noisy
-# (Sffentlichte, Ti AR RY), so we re-OCR with PaddleOCR.
+# Carlsen Verlag 2013 edition (translator: Klaus Fritz).
+# The PDF has an OCR text layer but it's noisy (Sffentlichte, Ti AR RY),
+# so we re-OCR with PaddleOCR.
 pdf_path: data/raw/hp1_de.pdf
 expected_sha256: eeefb4df665a9eb24e1000b9023800de2612fd334400c360445715a02d715aac
 total_pages: 340
@@ -17,7 +17,6 @@ publisher: "Carlsen Verlag"
 edition: "September 2013"
 year: 2013
 isbn: "978-3-551-31311-9"
-source: "Internet Archive (Scribe 5.7)"
 
 # Chapter 1 page range (1-indexed, inclusive)
 # Found by scanning the text layer: page 7 = "Ein Junge überlebt" (chap 1),
