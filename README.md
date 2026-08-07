@@ -59,7 +59,3 @@ uv run python scripts/patch_stanza_lemma_format.py       # one-time v3→v2 form
 This repository contains **code, configuration, schemas, manifests, synthetic-fixture tests, and documentation only**. It must never contain source PDFs, rendered page images, OCR output, cleaned novel text, embeddings, or model weights.
 
 `.gitignore` enforces this and `tests/test_gitignore.py` guards it. All commands print only metadata and counts — no novel text reaches the terminal, the test suite, the README, commits, or reports. Tests use synthetic fixtures exclusively.
-
-## See also
-
-- [`CLAUDE.md`](CLAUDE.md) — architecture, design decisions, and contributor guidance.

@@ -35,3 +35,6 @@ tmp/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Local-only Claude context (project internals, acquisition info, SHA-256 of source PDFs)
+CLAUDE.local.md

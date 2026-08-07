@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hp-corpus"
 version = "0.1.0"
-description = "EN-ZH parallel corpus extraction pipeline for Harry Potter and the Sorcerer's Stone Chapter 1"
+description = "EN/ZH/DE parallel-corpus pipeline + UD parsing for translation mining on Harry Potter (Bremmers et al. 2022 reproduction)"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "pymupdf>=1.24",
