@@ -14,16 +14,7 @@ Reproduce the paper's PP dataset from Chapters 1–3:
 2. Run the paper's `conll-extractor` on the German output
 3. Cross-validate hits against `FILTER_CONTRACTED_123` / `FILTER_PP` from `conll_extractor.prepositions.data`
 4. Map each German PP to its EN/ZH translation via LaBSE-based alignment
-5. MDS visualization of definiteness dimensions (deferred)
-
-**Status** (Ch.1 validated):
-- ✅ UD parsing complete for all three languages (DE 362 / EN 340 / ZH 351 sentences)
-- ✅ Paper extractor adapted — `scripts/run_paper_extractor.py`
-- ✅ Contracted PPs: 37/44 (84%) match the paper's filter; uncontracted: 12/39 (31%)
-- ⏳ Ch.2 + Ch.3 extraction in progress
-- ⏳ Cross-lingual PP mapping + MDS deferred until Ch.1–3 validates end-to-end
-
-See `CLAUDE.md` for full methodology and current blockers.
+5. MDS visualization of definiteness dimensions
 
 ## Copyright boundary — read this first
 
@@ -117,7 +108,7 @@ For Bremmers PP extraction, see `scripts/run_paper_extractor.py`.
 ## Tests
 
 ```bash
-uv run pytest                       # 49 unit tests, synthetic fixtures only
+uv run pytest                       # unit suite, synthetic fixtures only (no PDFs, no models)
 uv run pytest -m integration        # requires source PDFs + installed models
 ```
 
