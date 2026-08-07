@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install package (dev extras only — ocr/align are heavy and not needed for unit tests)
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Pytest (unit suite — integration tests require source PDFs and are skipped)
+        run: uv run pytest -m "not integration"
+
+      - name: Tracked-file leakage guard
+        run: uv run pytest tests/test_gitignore.py -v
