@@ -38,3 +38,7 @@ tmp/
 
 # Local-only Claude context (project internals, acquisition info, SHA-256 of source PDFs)
 CLAUDE.local.md
+
+# Local-only config overrides (e.g., real expected_sha256 for hash verification)
+config/*.local.yaml
+config/local/

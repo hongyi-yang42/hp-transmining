@@ -26,7 +26,7 @@ class SourceReport(BaseModel):
     path: str
     exists: bool
     size_bytes: int
-    expected_sha256: str
+    expected_sha256: str | None = None
     actual_sha256_prefix: str
     sha256_ok: bool
     expected_total_pages: int
@@ -67,9 +67,16 @@ def has_text_layer(doc: fitz.Document, sample_pages: int = 5) -> bool:
 
 
 def validate_source(config: dict[str, Any]) -> SourceReport:
-    """Validate one source PDF against its manifest entry. Raises ValidationError on mismatch."""
+    """Validate one source PDF against its manifest entry. Raises ValidationError on mismatch.
+
+    `expected_sha256` is optional: when absent, the hash check is skipped
+    (file-existence, page-count, and text-layer checks still run). This
+    lets public configs ship without source-PDF fingerprints; users who
+    want hash verification can populate the field in a gitignored local
+    override (e.g., `config/hp1_de.local.yaml`) and pass `--config` to it.
+    """
     path = config["pdf_path"]
-    expected_sha = config["expected_sha256"]
+    expected_sha = config.get("expected_sha256")
     expected_pages = config["total_pages"]
     expected_layer = config["has_text_layer"]
     document_id = f"{config['book']}_{config['lang']}"
@@ -77,13 +84,24 @@ def validate_source(config: dict[str, Any]) -> SourceReport:
     p = Path(path)
     exists = p.exists()
     size_bytes = p.stat().st_size if exists else 0
-    actual_sha = sha256_file(p) if exists else ""
-    actual_sha_prefix = actual_sha[:12] if actual_sha else ""
 
     if not exists:
         raise ValidationError(f"Source file not found: {path}")
 
-    sha_ok = actual_sha == expected_sha
+    if expected_sha:
+        actual_sha = sha256_file(p)
+        actual_sha_prefix = actual_sha[:12]
+        sha_ok = actual_sha == expected_sha
+        sha_problem = (
+            f"sha256 mismatch (expected {expected_sha[:12]}…, got {actual_sha_prefix}…)"
+            if not sha_ok
+            else ""
+        )
+    else:
+        actual_sha_prefix = ""
+        sha_ok = True
+        sha_problem = ""
+
     page_count_ok = False
     actual_pages = 0
     layer_ok = False
@@ -115,8 +133,7 @@ def validate_source(config: dict[str, Any]) -> SourceReport:
     problems = [
         f
         for f in (
-            not sha_ok
-            and f"sha256 mismatch (expected {expected_sha[:12]}…, got {actual_sha_prefix}…)",
+            sha_problem,
             not page_count_ok
             and f"page count mismatch (expected {expected_pages}, got {actual_pages})",
             not layer_ok and f"text-layer mismatch (expected {expected_layer}, got {actual_layer})",

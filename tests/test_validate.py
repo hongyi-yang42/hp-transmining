@@ -132,3 +132,42 @@ def test_validate_source_raises_when_file_missing(tmp_path: Path) -> None:
     }
     with pytest.raises(ValidationError, match="not found"):
         validate_source(cfg)
+
+
+def test_validate_source_skips_hash_when_expected_sha_absent(tmp_path: Path) -> None:
+    """Public configs ship without expected_sha256; validation must still
+    succeed (file-existence, page-count, and text-layer checks run; hash
+    check is skipped)."""
+    p = tmp_path / "text.pdf"
+    _make_text_pdf(p, n_pages=5)
+    cfg = {
+        "book": "test",
+        "lang": "en",
+        "pdf_path": str(p),
+        # NOTE: no expected_sha256 field — mimics the public configs.
+        "total_pages": 5,
+        "has_text_layer": True,
+    }
+    report = validate_source(cfg)
+    assert report.expected_sha256 is None
+    assert report.actual_sha256_prefix == ""  # not computed when expected is absent
+    assert report.sha256_ok is True  # skipped counts as ok
+    assert report.page_count_ok
+    assert report.text_layer_ok
+
+
+def test_validate_source_without_sha_still_detects_page_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    """Hash-skip must not also skip page-count / text-layer checks."""
+    p = tmp_path / "text.pdf"
+    _make_text_pdf(p, n_pages=5)
+    cfg = {
+        "book": "test",
+        "lang": "en",
+        "pdf_path": str(p),
+        "total_pages": 999,  # mismatch — must still be caught
+        "has_text_layer": True,
+    }
+    with pytest.raises(ValidationError, match="page count"):
+        validate_source(cfg)

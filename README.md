@@ -35,7 +35,7 @@ Requires Python 3.11–3.12 (PaddlePaddle has no wheels for 3.13/3.14) and [`uv`
 
 ```bash
 uv venv -p 3.12
-uv pip install -e ".[ocr,align,dev]"
+uv pip install -e ".[ocr,align,parse,dev]"
 git clone https://github.com/thompsonb/vecalign.git vendor/vecalign
 git clone https://github.com/time-in-translation/conll-extractor.git vendor/conll-extractor
 ```

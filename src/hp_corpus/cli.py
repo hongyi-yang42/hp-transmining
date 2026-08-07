@@ -78,7 +78,10 @@ def _print_validation(report: Any) -> None:
     table.add_column("value")
     table.add_row("path", report.path)
     table.add_row("size_bytes", str(report.size_bytes))
-    table.add_row("expected_sha256", report.expected_sha256[:16] + "…")
+    table.add_row(
+        "expected_sha256",
+        (report.expected_sha256[:16] + "…") if report.expected_sha256 else "(none, skipped)",
+    )
     table.add_row("actual_sha256_prefix", report.actual_sha256_prefix + "…")
     table.add_row("sha256_ok", str(report.sha256_ok))
     table.add_row("expected_total_pages", str(report.expected_total_pages))

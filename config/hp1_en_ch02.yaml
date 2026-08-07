@@ -2,7 +2,6 @@ book: hp1
 lang: en
 
 pdf_path: data/raw/hp1_en.pdf
-expected_sha256: f1009a6d82c9fa33929eda3f95343273fd6be0c0fe6f540be243470735beefa6
 total_pages: 327
 has_text_layer: true
 

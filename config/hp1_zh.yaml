@@ -3,7 +3,6 @@ lang: zh
 
 # Source PDF — People's Literature Publishing House, Su Nong translation, 2018 23rd printing
 pdf_path: data/raw/hp1_zh.pdf
-expected_sha256: d2ab2782f53d2d26f692a83dc2e14b76b22d1eda8367eb9c0afd4d3e6fc7428d
 total_pages: 93
 has_text_layer: false
 
