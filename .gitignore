@@ -36,6 +36,10 @@ tmp/
 .ruff_cache/
 .mypy_cache/
 
+# Editor / IDE local state
+.vscode/
+.idea/
+
 # Local-only Claude context (project internals, acquisition info, SHA-256 of source PDFs)
 CLAUDE.local.md
 
