@@ -1,22 +1,21 @@
 book: hp1
 lang: de
 
-pdf_path: data/raw/hp1_de.pdf
-total_pages: 340
-has_text_layer: true  # OCR text layer present but noisy
+# Carlsen 1998 first edition, Chapter 2. See hp1_de.yaml for source details.
+pdf_path: data/raw/1998 Harry Potter und der Stein der Weisen -- 1998.pdf
+total_pages: 337
+has_text_layer: true
 
 title: "Harry Potter und der Stein der Weisen"
 author: "J.K. Rowling"
 translator: "Klaus Fritz"
 publisher: "Carlsen Verlag"
-edition: "September 2013"
-year: 2013
+edition: "Erste Auflage 1998"
+year: 1998
 isbn: "978-3-551-31311-9"
 
-# Chapter 2 page range — "Ein Fenster verschwindet".
-# Verified via the text layer: "Ein Fenster verschwindet" appears as
-# chapter opener on p.26. Ch.3 ("Briefe von niemandem") opens on p.40,
-# so Ch.2 = pp.26-39.
+# Chapter 2 page range — "Ein Fenster Verschwindet" (Title Case in 1998).
+# Ch.3 "Briefe von niemandem" opens on p.40, so Ch.2 = pp.26-39.
 chapter:
   number: 2
   start_page: 26
@@ -26,17 +25,16 @@ scan:
   dpi: 300
 
 ocr:
-  engine: paddleocr
+  engine: pymupdf
   lang: german
-  model: PP-OCRv5
 
 clean:
   header_patterns:
-    - "Harry Potter"
-    - "Ein Fenster verschwindet"
+    - "Ein Fenster Verschwindet"
   remove_page_numbers: true
   min_confidence: 0.5
   merge_line_breaks: true
+  # concat_split: false  # available; off for 1998 DE (inline wordlist over-splits)
   paragraph_detection:
     indent_threshold: 2
     dialogue_markers: ['»', '«']

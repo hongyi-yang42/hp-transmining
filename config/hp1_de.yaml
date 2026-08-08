@@ -1,25 +1,33 @@
 book: hp1
 lang: de
 
-# Carlsen Verlag 2013 edition (translator: Klaus Fritz).
-# The PDF has an OCR text layer but it's noisy (Sffentlichte, Ti AR RY),
-# so we re-OCR with PaddleOCR.
-pdf_path: data/raw/hp1_de.pdf
-total_pages: 340
-has_text_layer: true  # present but low-quality; override via ocr.engine below
+# Carlsen Verlag 1998 first edition (translator: Klaus Fritz).
+# Born-digital PDF (Microsoft Word → Acrobat PDFWriter 4.0, 2000-10-01),
+# full text layer present on 329/337 pages. Same Klaus Fritz translation
+# as the 2013 reissue; same chapter pagination (Ch.1=pp.7-25 etc.).
+# We read the text layer directly via PyMuPDF — no OCR needed.
+#
+# The 1998 first edition is the primary DE source because it matches the
+# paper's edition (Bremmers et al. cite the 1998 Carlsen edition) and is
+# born-digital (no OCR noise). The 2013 reissue remains in data/raw/ as a
+# fallback but is no longer wired into the pipeline.
+pdf_path: data/raw/1998 Harry Potter und der Stein der Weisen -- 1998.pdf
+total_pages: 337
+has_text_layer: true
 
 # Bibliographic metadata
 title: "Harry Potter und der Stein der Weisen"
 author: "J.K. Rowling"
 translator: "Klaus Fritz"
 publisher: "Carlsen Verlag"
-edition: "September 2013"
-year: 2013
+edition: "Erste Auflage 1998"
+year: 1998
 isbn: "978-3-551-31311-9"
 
-# Chapter 1 page range (1-indexed, inclusive)
-# Found by scanning the text layer: page 7 = "Ein Junge überlebt" (chap 1),
-# page 26 = "Ein Fenster verschwindet" (chap 2).
+# Chapter 1 page range (1-indexed, inclusive).
+# Found by scanning the text layer: p.7 = "Ein Junge Überlebt" (Title Case
+# in this edition; the 2013 reissue lowercases the verb). Ch.2 opener
+# "Ein Fenster Verschwindet" on p.26.
 chapter:
   number: 1
   start_page: 7
@@ -29,18 +37,23 @@ scan:
   dpi: 300
 
 ocr:
-  engine: paddleocr
-  lang: german  # PaddleOCR's German model name
-  model: PP-OCRv5
+  engine: pymupdf  # text layer is good — no PaddleOCR pass needed
+  lang: german     # only used by PaddleOCR path; required key regardless
 
 clean:
-  # Conservative starting point — refine after inspecting OCR output.
+  # 1998 has no running "Harry Potter" header at top of each page (unlike 2013).
+  # Page numbers appear as the last text block on each page (book page 5 on
+  # PDF page 7, etc.) — `remove_page_numbers: true` handles them.
   header_patterns:
-    - "Harry Potter"
-    - "Ein Junge überlebt"
+    - "Ein Junge Überlebt"  # Title Case in 1998
   remove_page_numbers: true
-  min_confidence: 0.5  # same as ZH; drop PaddleOCR noise
+  min_confidence: 0.5
   merge_line_breaks: true
+  # NOTE: ``concat_split`` is available (see src/hp_corpus/text_split.py) but
+  # OFF for this source — the inline wordlist built from a single chapter
+  # over-splits real compounds. Whitespace normalization in
+  # ``_strip_block_text`` alone fixes the dominant concat bug.
+  # concat_split: false
   paragraph_detection:
     indent_threshold: 2
     dialogue_markers: ['»', '«']
