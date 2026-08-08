@@ -2,11 +2,11 @@
 
 **Translation mining on Harry Potter.** Reproducing Bremmers et al. (2022) — *"Translation Mining: Definiteness across Languages"* — by rebuilding the parallel corpus and prepositional-phrase extraction pipeline from the three translations of *Harry Potter and the Sorcerer's Stone*.
 
-Translation mining extracts grammatical categories (here: definiteness) from parallel translations rather than from manual annotation. The three editions — Scholastic 1998 (English), People's Lit. 2018 (Chinese, Su Nong), and Carlsen 2013 (German, Klaus Fritz) — supply a sentence-aligned DE/EN/ZH corpus on which to run the paper's PP extractor and study how definiteness surfaces across languages.
+Translation mining extracts grammatical categories (here: definiteness) from parallel translations rather than from manual annotation. The three editions — Scholastic 1998 (English), People's Lit. 2018 (Chinese, Su Nong), and Carlsen 1998 first edition (German, Klaus Fritz) — supply a sentence-aligned DE/EN/ZH corpus on which to run the paper's PP extractor and study how definiteness surfaces across languages.
 
 ## What this project does
 
-- **Builds a parallel corpus from PDFs.** Renders image-only PDFs, runs PaddleOCR (ZH/DE) and embedded-text-layer extraction (EN), applies conservative cleaning heuristics, segments into sentences with stable IDs, and aligns sentence pairs across languages via LaBSE embeddings + dynamic programming.
+- **Builds a parallel corpus from PDFs.** Renders image-only PDFs, runs PaddleOCR (ZH) and embedded-text-layer extraction (EN/DE — both born-digital), applies conservative cleaning heuristics, segments into sentences with stable IDs, and aligns sentence pairs across languages via `intfloat/multilingual-e5-base` embeddings + dynamic programming.
 - **Parses with Universal Dependencies.** Stanza (tokenize + mwt + pos + lemma + depparse) → CoNLL-U for all three languages, preserving German contraction range lines (`5-6 im`) so the paper's extractor works unmodified.
 - **Extracts prepositional phrases.** An adapted `conll-extractor` runs over the German CoNLL-U and every hit is cross-validated against `FILTER_CONTRACTED_123` / `FILTER_PP` from the paper's annotation set.
 
@@ -16,7 +16,7 @@ Translation mining extracts grammatical categories (here: definiteness) from par
 hp-corpus validate                              # SHA-256 + page-count + text-layer checks
 hp-corpus run       --config config/hp1_*.yaml  # render → ocr → clean → segment
 hp-corpus parse     --config config/hp1_*.yaml  # → CoNLL-U (Stanza)
-hp-corpus align     --src … --tgt … --out-name … # cross-language LaBSE + DP alignment
+hp-corpus align     --src … --tgt … --out-name … # cross-language e5-base + DP alignment
 ```
 
 | Stage | Module | Output |
@@ -40,7 +40,7 @@ git clone https://github.com/thompsonb/vecalign.git vendor/vecalign
 git clone https://github.com/time-in-translation/conll-extractor.git vendor/conll-extractor
 ```
 
-Bring your own copies of the three PDFs and place them at `data/raw/hp1_{en,zh,de}.pdf` (gitignored). Configure bibliographic metadata, expected SHA-256 hashes, and chapter page ranges in `config/hp1_{en,zh,de}.yaml`.
+Bring your own copies of the three PDFs and place them under `data/raw/` (gitignored). EN/ZH use the short names `hp1_en.pdf`, `hp1_zh.pdf`; DE uses the long original filename `1998 Harry Potter und der Stein der Weisen -- 1998.pdf` (the configs reference it directly). Configure bibliographic metadata and chapter page ranges in `config/hp1_{en,zh,de}*.yaml`.
 
 For UD parsing, install Stanza models. HuggingFace is blocked from CN — use the ModelScope mirror:
 

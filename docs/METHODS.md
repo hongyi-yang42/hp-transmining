@@ -4,7 +4,7 @@
 
 This is an **extraction-method reproduction** of Bremmers et al. (2022) *"Translation Mining: Definiteness across Languages"* — not a parser-identical replication. We use the paper's published extraction logic verbatim; the parser differs because Bremmers et al. do not report which UD parser they used.
 
-A 100% match against the paper's `FILTER_CONTRACTED_123` / `FILTER_PP` is therefore not achievable: residual differences come from parser variation (our Stanza vs the paper's unreported parser) and from edition-specific German PPs in the Carlsen 2013 text that the paper did not annotate.
+A 100% match against the paper's `FILTER_CONTRACTED_123` / `FILTER_PP` is therefore not achievable: residual differences come from parser variation (our Stanza vs the paper's unreported parser) and from edition-specific German PPs in the Carlsen 1998 text that the paper did not annotate.
 
 ## Parser
 
