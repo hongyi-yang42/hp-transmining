@@ -285,3 +285,76 @@ def test_zh_unaffected_by_de_line_join(zh_config) -> None:
     # No space inserted between Chinese lines
     assert "达斯利先生非常骄傲" in result.sentences[0].text
     assert " " not in result.sentences[0].text
+
+
+def test_whitespace_normalization_replaces_control_char_strip(en_config) -> None:
+    """A newline inside a block must become a single space, not be dropped.
+
+    The old behavior stripped \\n along with other C0 control chars, which
+    concatenated the two words on either side of the newline into one
+    token. The new behavior normalizes any whitespace run (incl. \\n,
+    \\t, \\xa0) to a single space.
+    """
+    cfg = en_config
+    blocks = [
+        _blk(1, 0, "first\nsecond third"),  # \\n between "first" and "second"
+        _blk(1, 1, "End of paragraph."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    text = " ".join(s.text for s in result.sentences)
+    assert "first second" in text
+    assert "firstsecond" not in text
+
+
+def test_concat_split_disabled_by_default(de_config) -> None:
+    """Without ``clean.concat_split``, the splitter must not fire — even on
+    an obvious concat artifact — so existing behavior (e.g. PaddleOCR'd
+    2013 source) is unchanged."""
+    cfg = de_config
+    blocks = [
+        # "derHaus" is a textbook concat that the splitter would split when
+        # enabled. With the flag off, it must survive untouched.
+        _blk(1, 0, "derHaus steht"),
+        _blk(1, 1, "derHaus steht"),  # repeated so it'd pass freq filter
+        _blk(1, 2, "Ende."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    text = " ".join(s.text for s in result.sentences)
+    assert "derHaus" in text
+
+
+def test_concat_split_enabled_splits_artifacts(de_config) -> None:
+    """With ``clean.concat_split: true``, the inline wordlist is built from
+    this chapter's blocks and obvious concat artifacts are split.
+
+    The frequency filter (>=2) keeps the artifact out of the wordlist
+    (it appears once), so the splitter tries to split it.
+    """
+    cfg = {**de_config, "clean": {**de_config["clean"], "concat_split": True}}
+    blocks = [
+        # "der" and "Haus" appear often enough to enter the wordlist;
+        # "derHaus" appears once as a concat artifact.
+        _blk(1, 0, "der Haus steht"),
+        _blk(1, 1, "das Haus steht"),
+        _blk(1, 2, "derHaus steht"),  # artifact
+        _blk(1, 3, "Ende."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    text = " ".join(s.text for s in result.sentences)
+    assert "der Haus steht" in text
+    assert "derHaus" not in text
+
+
+def test_concat_split_preserves_real_compounds(de_config) -> None:
+    """A real German compound (Apfelbaum) that appears multiple times must
+    NOT be split even when concat_split is on — the early `_is_known`
+    check in split_concat returns the token unchanged."""
+    cfg = {**de_config, "clean": {**de_config["clean"], "concat_split": True}}
+    blocks = [
+        _blk(1, 0, "Apfelbaum blüht"),
+        _blk(1, 1, "Apfelbaum wächst"),
+        _blk(1, 2, "Ende."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    text = " ".join(s.text for s in result.sentences)
+    assert "Apfelbaum" in text  # not split into "Apfel baum"

@@ -28,16 +28,35 @@ from pathlib import Path
 from typing import Any
 
 from .schema import CleanSentence, OCRBlock
+from .text_split import split_concat
 
 # Sentence terminators used for cross-page rejoin decisions.
 _TERMINATORS_ZH = "。！？；”’》）】》\"'"
 _TERMINATORS_EN = ".!?\";'…)]"
 _TERMINATORS = _TERMINATORS_ZH + _TERMINATORS_EN
 
+# When ``clean.concat_split`` is enabled, a token must appear at least this
+# many times in the chapter to enter the validation wordlist. The filter
+# keeps one-off concat artifacts out of the wordlist (so the splitter
+# actually tries to split them) while still including real one-off words
+# that happen to be ≥2 — the splitter's morphology fallback handles the
+# genuinely rare ones.
+_CONCAT_WORDLIST_MIN_FREQ = 2
+
 # Decorative single-char blocks (asterisks, ornaments, dots).
 _DECORATIVE = {"*", "·", "•", "◇", "◆", "■", "□", "★", "☆", "✦", "✧", "~", "〜", "§", "||"}
 _FOOTNOTE_RE = re.compile(r"^[①②③④⑤⑥⑦⑧⑨⑩]")
 _PURE_DIGITS_RE = re.compile(r"^\d{1,4}$")
+
+# Regexes used by the optional concat-split pass.
+# _TOKEN_RE splits a string into alternating (token, whitespace) pairs so we
+# can re-join with original whitespace preserved. _WORD_TOKEN_RE extracts
+# word-only tokens (incl. German umlauts) for wordlist-building. _WORD_PUNCT_RE
+# captures leading punctuation, word core, trailing punctuation — used to
+# apply the splitter while keeping surrounding punctuation intact.
+_TOKEN_RE = re.compile(r"(\s+)")
+_WORD_TOKEN_RE = re.compile(r"[A-Za-zÄÖÜäöüß]+")
+_WORD_PUNCT_RE = re.compile(r"^([^\wäöüßÄÖÜ]*)([\wäöüßÄÖÜ]+?)([^\wäöüßÄÖÜ]*)$")
 
 # A block is "indented" if its bbox x0 exceeds the page's body-text cluster
 # by a meaningful margin. PaddleOCR's body-text x0 has ~30px jitter on a
@@ -55,11 +74,67 @@ class CleanResult:
 
 
 def _strip_block_text(text: str) -> str:
-    # Drop C0/C1 control chars — PyMuPDF sometimes wraps page numbers in
+    # Drop C1 control chars only — PyMuPDF sometimes wraps page numbers in
     # private-use markers like "\x91 17 \x91" as decorative side flourishes.
     # Without this, the page-number regex sees "\x9117\x91" and misses it.
-    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", text)
-    return text.replace(" ", " ").strip()
+    # (C0 control chars — \n, \t, etc. — are handled by the whitespace
+    # normalize below; stripping them would concatenate adjacent words.)
+    text = re.sub(r"[\x7f-\x9f]", "", text)
+    # Normalize any whitespace run (incl. \n, \t, \xa0) to a single space.
+    # Born-digital PDF text layers frequently separate words within a block
+    # with \n; collapsing those to nothing (the old behavior) joined the
+    # words into one concat artifact.
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _build_inline_wordlist(blocks: list[OCRBlock]) -> set[str]:
+    """Build a validation wordlist from this chapter\'s own blocks.
+
+    Frequency-filtered: a token must appear at least
+    :data:`_CONCAT_WORDLIST_MIN_FREQ` times to enter the wordlist. This
+    keeps one-off text-layer concat artifacts (e.g. ``beimersten``,
+    ``Endeder``) out of the wordlist so the splitter actually tries to
+    split them, while still capturing the chapter\'s common vocabulary.
+    """
+    from collections import Counter
+
+    counts: Counter[str] = Counter()
+    for b in blocks:
+        counts.update(_WORD_TOKEN_RE.findall(b.text))
+    wl: set[str] = set()
+    for tok, n in counts.items():
+        if n >= _CONCAT_WORDLIST_MIN_FREQ:
+            wl.add(tok)
+            wl.add(tok.lower())
+    # Function words (articles, prepositions, pronouns, auxiliaries) are
+    # intentionally NOT added here — they are already baked into
+    # text_split.FUNCTION_WORDS as split indicators, so listing them in
+    # the wordlist would be redundant.
+    return wl
+
+
+def _split_concat_in_text(text: str, wordlist: set[str]) -> tuple[str, int]:
+    """Apply :func:`split_concat` to every non-whitespace run in ``text``.
+
+    Leading/trailing punctuation on each token is preserved verbatim.
+    Returns ``(new_text, n_splits)``. When ``n_splits == 0`` the text is
+    unchanged.
+    """
+    pieces = _TOKEN_RE.split(text)
+    n_splits = 0
+    for i, piece in enumerate(pieces):
+        if i % 2 == 1 or not piece:
+            continue  # whitespace separator or empty
+        m = _WORD_PUNCT_RE.match(piece)
+        if not m:
+            continue
+        leading, core, trailing = m.groups()
+        sub = split_concat(core, wordlist)
+        if len(sub) > 1:
+            n_splits += len(sub) - 1
+            pieces[i] = leading + " ".join(sub) + trailing
+    return "".join(pieces), n_splits
 
 
 def _is_decorative(text: str) -> bool:
@@ -99,6 +174,10 @@ def clean_blocks(
     # at extreme bbox positions or with very low confidence; these pollute
     # downstream alignment).
     min_confidence = clean_cfg.get("min_confidence", 0.4)
+    # Optional: split text-layer concat artifacts (e.g. ``beimersten``,
+    # ``Endeder``) typical of born-digital PDFs. Defaults to off — only
+    # needed when the source PDF's text layer has known concat issues.
+    concat_split = bool(clean_cfg.get("concat_split", False))
 
     # 1. Page range filter
     in_range = [b for b in blocks if start_page <= b.page <= end_page]
@@ -111,15 +190,33 @@ def clean_blocks(
     # than 3x the page's median x0.
     in_range = _drop_bbox_outliers(in_range)
 
+    # 1c. Whitespace-normalize every block in-range. We do this once here
+    # so both the wordlist builder and the classifier see the same text.
+    in_range = [
+        b.model_copy(update={"text": t})
+        for b in in_range
+        if (t := _strip_block_text(b.text))
+    ]
+
+    # 1d. Optional concat-split pass. Build the wordlist from this chapter's
+    # own normalized blocks (frequency-filtered), then apply the splitter
+    # token-by-token. The pass is conservative — see text_split.py — so
+    # real compounds (Apfelbaum) survive untouched.
+    if concat_split:
+        wordlist = _build_inline_wordlist(in_range)
+        split_blocks: list[OCRBlock] = []
+        for b in in_range:
+            new_text, _ = _split_concat_in_text(b.text, wordlist)
+            split_blocks.append(b.model_copy(update={"text": new_text}))
+        in_range = split_blocks
+
     # 2-5. Per-block classification
     seen_headers: set[str] = set()
     chapter_title: str | None = None
     footnotes: list[OCRBlock] = []
     kept: list[OCRBlock] = []
     for b in in_range:
-        text = _strip_block_text(b.text)
-        if not text:
-            continue
+        text = b.text  # already normalized (and optionally split) above
 
         # Confidence filter — drop low-confidence OCR noise (default <0.4).
         # PyMuPDF text-layer blocks always carry confidence=1.0 so this only
