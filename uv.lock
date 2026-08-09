@@ -355,6 +355,8 @@ align = [
     { name = "sentence-transformers" },
 ]
 dev = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -368,6 +370,7 @@ parse = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", marker = "extra == 'align'", specifier = ">=1.26" },
+    { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26" },
     { name = "paddleocr", marker = "extra == 'ocr'", specifier = ">=2.7" },
     { name = "pyconll", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2" },

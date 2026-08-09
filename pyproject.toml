@@ -29,6 +29,7 @@ parse = [
 dev = [
     "pytest>=8",
     "ruff>=0.5",
+    "numpy>=1.26",
 ]
 
 [project.scripts]
