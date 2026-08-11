@@ -290,7 +290,7 @@ def _check_filled_annotations(rows: list[dict[str, str]]) -> list[Violation]:
                             row=idx,
                         )
                     )
-                if form and form != "omitted":
+                if form != "omitted":
                     out.append(
                         Violation(
                             "OMITTED_WRONG_FORM",
@@ -418,12 +418,40 @@ def _check_alignment_completeness(rows: list[dict[str, str]]) -> list[Violation]
 # --------------------------------------------------------------------- driver
 
 
-def validate_tsv(path: Path) -> tuple[list[Violation], dict[str, Any]]:
+def _build_summary(
+    rows_count: int,
+    initial_state: bool,
+    violations: list[Violation],
+    full_sample: bool,
+) -> dict[str, Any]:
+    return {
+        "rows": rows_count,
+        "initial_state": initial_state,
+        "violation_count": len(violations),
+        "by_rule": dict(Counter(v.rule for v in violations)),
+        "full_sample": full_sample,
+    }
+
+
+def _check_nonempty_body(body: list[dict[str, str]]) -> list[Violation]:
+    """A header-only TSV (zero body rows) is almost certainly an upstream
+    failure (missing extraction TSVs, Stanza parse error). Flag it rather
+    than letting the file slip through as a valid empty annotation target.
+    """
+    if not body:
+        return [Violation("EMPTY_BODY", "TSV has a header but zero body rows")]
+    return []
+
+
+def validate_tsv(
+    path: Path, *, full_sample: bool = False
+) -> tuple[list[Violation], dict[str, Any]]:
     with open(path, encoding="utf-8") as f:
         reader = csv.reader(f, delimiter="\t")
         rows_raw = list(reader)
     if not rows_raw:
-        return [Violation("EMPTY_FILE", "TSV has no rows")], {}
+        v = [Violation("EMPTY_FILE", "TSV has no rows")]
+        return v, _build_summary(0, False, v, full_sample)
     header = rows_raw[0]
     body = [dict(zip(header, row, strict=False)) for row in rows_raw[1:] if any(row)]
 
@@ -431,10 +459,15 @@ def validate_tsv(path: Path) -> tuple[list[Violation], dict[str, Any]]:
     violations.extend(_check_headers(header))
     # If headers are wrong, downstream parsing may explode; bail.
     if any(v.rule == "HEADER_MISMATCH" for v in violations):
-        return violations, {}
+        return violations, _build_summary(0, False, violations, full_sample)
 
+    violations.extend(_check_nonempty_body(body))
     violations.extend(_check_unique_datapoint_ids(body))
-    violations.extend(_check_pilot_balance(body))
+    # The pilot-balance check (exactly 10+10) only applies to the method
+    # pilot. Skip it when validating a full Bremmers-sample TSV, whose
+    # contracted/uncontracted counts are determined by the source text.
+    if not full_sample:
+        violations.extend(_check_pilot_balance(body))
     violations.extend(_check_occurrence_coords(body))
     violations.extend(_check_source_row_hash(body))
     violations.extend(_check_alignment_completeness(body))
@@ -443,13 +476,9 @@ def validate_tsv(path: Path) -> tuple[list[Violation], dict[str, Any]]:
     if not initial_state:
         violations.extend(_check_filled_annotations(body))
 
-    summary = {
-        "rows": len(body),
-        "initial_state": initial_state,
-        "violation_count": len(violations),
-        "by_rule": dict(Counter(v.rule for v in violations)),
-    }
-    return violations, summary
+    return violations, _build_summary(
+        len(body), initial_state, violations, full_sample
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -461,13 +490,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit non-zero on any violation (default behavior). "
         "Without --strict, exit 0 if all failures are annotation-level only.",
     )
+    ap.add_argument(
+        "--full-sample",
+        action="store_true",
+        help="Skip pilot-only checks (PILOT_IMBALANCE). Use when validating "
+        "a full Bremmers-sample TSV whose row count is not the 10+10 pilot.",
+    )
     args = ap.parse_args(argv)
 
     if not args.tsv.exists():
         print(f"FAIL: file not found: {args.tsv}", file=sys.stderr)
         return 2
 
-    violations, summary = validate_tsv(args.tsv)
+    violations, summary = validate_tsv(args.tsv, full_sample=args.full_sample)
 
     # Aggregate-only stdout. Never print row text.
     print(f"file: {args.tsv}")

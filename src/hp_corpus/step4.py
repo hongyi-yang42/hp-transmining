@@ -52,6 +52,7 @@ CONTRACTED_PREP_NORMALIZATION: dict[str, str] = {
     "ans": "an",
     "aufs": "auf",
     "aufm": "auf",
+    "ausm": "aus",
     "beim": "bei",
     "durchs": "durch",
     "fürs": "für",
@@ -65,7 +66,6 @@ CONTRACTED_PREP_NORMALIZATION: dict[str, str] = {
     "überm": "über",
     "übers": "über",
     "übern": "über",
-    "umt": "um",
     "ums": "um",
     "unterm": "unter",
     "unters": "unter",
@@ -74,6 +74,35 @@ CONTRACTED_PREP_NORMALIZATION: dict[str, str] = {
     "vors": "vor",
     "zum": "zu",
     "zur": "zu",
+}
+
+# Uncontracted preposition inventory — the canonical surface forms that
+# the paper's extractor treats as the "uncontracted" list (vendored
+# ``conll_extractor.prepositions.data.PREPOSITIONS``). Duplicated here so
+# this module stays self-contained (no vendor import).
+UNCONTRACTED_PREPOSITIONS: frozenset[str] = frozenset(
+    {"an", "auf", "aus", "bei", "durch", "für", "gegen", "hinter",
+     "in", "über", "unter", "von", "zu"}
+)
+
+# Paper §2.2.1 selection filter: keep a PP only if its canonical preposition
+# appears in BOTH inventories — i.e. the preposition has at least one
+# contracted form AND is itself an uncontracted preposition. Excludes
+# ``um`` and ``vor`` contractions only (neither is in the uncontracted
+# PREPOSITIONS list). Computed once at module load.
+PAPER_SHARED_PREPOSITIONS: frozenset[str] = frozenset(
+    set(CONTRACTED_PREP_NORMALIZATION.values()) & UNCONTRACTED_PREPOSITIONS
+)
+
+# Paper's Table A (German form distribution, full novel). Reference numbers
+# for comparison against our Ch.1-3 subset; lives here so any caller can
+# cite the paper without re-deriving or duplicating the constants.
+PAPER_TABLE_A: dict[str, Any] = {
+    "contracted": 40,
+    "uncontracted": 56,
+    "total": 96,
+    "contracted_pct": 41.5,
+    "uncontracted_pct": 58.5,
 }
 
 # Alignment JSONL may use any of these field-name pairs. Both sides get
@@ -708,6 +737,60 @@ class InsufficientCandidatesError(Exception):
         )
 
 
+def select_paper_sample(
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply the paper's preposition-inventory filter (Bremmers et al. 2022, §2.2.1).
+
+    Keeps candidates whose ``de_prep_normalized`` is in
+    :data:`PAPER_SHARED_PREPOSITIONS` — i.e. the canonical preposition
+    has both a contracted form and an uncontracted form in the language.
+
+    For Ch.1-3 the paper keeps every surviving contracted and
+    uncontracted occurrence; the Ch.4+ minimal-pair restriction
+    (contracted PPs in Ch.4+ are kept only when an uncontracted
+    counterpart with the same canonical preposition + head noun lemma
+    exists) does NOT apply here because Ch.4+ is out of scope. The
+    minimal-pair grouping is still computed (see
+    :data:`minimal_pair_groups_with_both_forms` in the summary) so the
+    Ch.4+ extension can resume from this output without re-deriving it.
+
+    Returns ``(selected, summary)``. Does not mutate the input list or
+    the candidate dicts; the selected list holds references to the same
+    dict objects.
+    """
+    selected: list[dict[str, Any]] = []
+    by_form: dict[str, int] = {"contracted": 0, "uncontracted": 0}
+    dropped_by_form: dict[str, int] = {"contracted": 0, "uncontracted": 0}
+    by_chapter: dict[int, int] = {}
+    # Minimal-pair groups (canonical_prep|head_lemma) restricted to the
+    # selected sample — counts groups that have BOTH forms after filtering.
+    selected_groups: dict[str, set[str]] = {}
+    for c in candidates:
+        if c["de_prep_normalized"] in PAPER_SHARED_PREPOSITIONS:
+            selected.append(c)
+            by_form[c["de_form"]] = by_form.get(c["de_form"], 0) + 1
+            by_chapter[c["chapter"]] = by_chapter.get(c["chapter"], 0) + 1
+            selected_groups.setdefault(c["minimal_pair_group"], set()).add(c["de_form"])
+        else:
+            dropped_by_form[c["de_form"]] = dropped_by_form.get(c["de_form"], 0) + 1
+
+    groups_with_both = sum(1 for forms in selected_groups.values() if len(forms) == 2)
+
+    summary = {
+        "candidate_total": len(candidates),
+        "selected_total": len(selected),
+        "dropped_total": len(candidates) - len(selected),
+        "by_form": by_form,
+        "dropped_by_form": dropped_by_form,
+        "by_chapter": {str(k): v for k, v in sorted(by_chapter.items())},
+        "shared_prepositions": sorted(PAPER_SHARED_PREPOSITIONS),
+        "minimal_pair_groups_in_sample": len(selected_groups),
+        "minimal_pair_groups_with_both_forms": groups_with_both,
+    }
+    return selected, summary
+
+
 # --------------------------------------------------------------------- writers
 
 
@@ -722,12 +805,23 @@ def write_candidates_jsonl(candidates: list[dict[str, Any]], path: Path) -> Path
     return path
 
 
-def write_pilot_tsv(selected: list[dict[str, Any]], path: Path) -> Path:
+def write_pilot_tsv(
+    selected: list[dict[str, Any]],
+    path: Path,
+    *,
+    scope_override: str | None = None,
+) -> Path:
     """Write the human-annotation TSV. Source columns are written from the
     candidate dict; editable columns are blank (waiting for the annotator).
 
     The source-row SHA-256 is recomputed immediately before writing each row
     so it always reflects the candidate's current source-column state.
+
+    If ``scope_override`` is given, every row's ``dataset_scope`` column
+    is set to that value (and the source-row hash reflects the override).
+    The override is applied in place on each candidate dict, matching the
+    existing ``source_row_sha256`` mutation pattern; callers that need the
+    original scope preserved should pass copies.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
@@ -740,6 +834,8 @@ def write_pilot_tsv(selected: list[dict[str, Any]], path: Path) -> Path:
         )
         w.writeheader()
         for cand in selected:
+            if scope_override is not None:
+                cand["dataset_scope"] = scope_override
             cand["source_row_sha256"] = compute_source_row_sha256(cand)
             row: dict[str, Any] = {}
             for col in ALL_TSV_COLUMNS:
@@ -775,7 +871,7 @@ def summarize_candidates(
 ) -> dict[str, Any]:
     """Aggregate counts only — safe for stdout/reports. No text lemmas,
     no surface forms, no segment IDs."""
-    by_form = {"contracted": 0, "uncontracted": 0}
+    by_form: dict[str, int] = {"contracted": 0, "uncontracted": 0}
     by_chapter: dict[int, int] = {}
     by_author_match = {True: 0, False: 0}
     en_missing = 0
@@ -785,7 +881,7 @@ def summarize_candidates(
     en_n_to_1 = 0  # 2:1, 3:1 — DE side may be in a multi-DE record
     zh_n_to_1 = 0
     for c in candidates:
-        by_form[c["de_form"]] += 1
+        by_form[c["de_form"]] = by_form.get(c["de_form"], 0) + 1
         by_chapter[c["chapter"]] = by_chapter.get(c["chapter"], 0) + 1
         by_author_match[c["author_resource_match"]] += 1
         if c["en_alignment_status"] == "missing":

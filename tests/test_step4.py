@@ -17,12 +17,14 @@ import pytest
 
 from hp_corpus.step4 import (
     EDITABLE_COLUMNS,
+    PAPER_SHARED_PREPOSITIONS,
     SOURCE_COLUMNS,
     InsufficientCandidatesError,
     build_candidates,
     compute_source_row_sha256,
     lang_from_segment_id,
     normalize_contracted_prep,
+    select_paper_sample,
     select_pilot,
     summarize_candidates,
     write_candidates_jsonl,
@@ -1017,3 +1019,281 @@ def test_validator_stdout_no_source_text(tmp_path: Path, monkeypatch, capsys) ->
     assert "Haus" not in captured.out
     assert "Wald" not in captured.out
     assert rc == 0
+
+
+# --------------------------------------------------------------------- paper-sample
+# Tests for select_paper_sample() and the validator --full-sample flag.
+# Synthetic candidate dicts only — no novel text, no filter-list lemmas.
+
+
+def test_paper_shared_prepositions_constant() -> None:
+    """The filter set is exactly the canonical prepositions that have
+    both a contracted form and an uncontracted form in the dataset."""
+    # 13 canonical prepositions survive: an, auf, aus, bei, durch, für,
+    # gegen, hinter, in, über, unter, von, zu. Excluded: um/vor (not in
+    # the uncontracted PREPOSITIONS list).
+    assert PAPER_SHARED_PREPOSITIONS == frozenset(
+        {"an", "auf", "aus", "bei", "durch", "für", "gegen",
+         "hinter", "in", "über", "unter", "von", "zu"}
+    )
+
+
+def _cand(
+    prep_norm: str, form: str, *, chapter: int = 1, group: str | None = None
+) -> dict[str, Any]:
+    """Build a minimal candidate dict that select_paper_sample will accept."""
+    if group is None:
+        group = f"{prep_norm}|Synth"
+    return {
+        "de_prep_normalized": prep_norm,
+        "de_form": form,
+        "chapter": chapter,
+        "minimal_pair_group": group,
+    }
+
+
+def test_select_paper_sample_keeps_shared_drops_rest() -> None:
+    """Survivors must have canonical prep in PAPER_SHARED_PREPOSITIONS."""
+    candidates = [
+        # Shared — kept.
+        _cand("in", "contracted"),
+        _cand("in", "uncontracted"),
+        _cand("zu", "contracted"),
+        _cand("an", "uncontracted"),
+        _cand("aus", "uncontracted"),  # aus IS shared (ausm → aus)
+        # Not shared — dropped.
+        _cand("um", "contracted"),    # um not in uncontracted list
+        _cand("vor", "contracted"),   # vor not in uncontracted list
+    ]
+    selected, summary = select_paper_sample(candidates)
+    kept_norms = sorted(c["de_prep_normalized"] for c in selected)
+    assert kept_norms == ["an", "aus", "in", "in", "zu"]
+    assert summary["selected_total"] == 5
+    assert summary["dropped_total"] == 2
+    assert summary["by_form"] == {"contracted": 2, "uncontracted": 3}
+    assert summary["dropped_by_form"] == {"contracted": 2, "uncontracted": 0}
+
+
+def test_select_paper_sample_does_not_mutate_input() -> None:
+    """The input list and its dicts must be untouched after the call."""
+    candidates = [_cand("in", "contracted"), _cand("aus", "uncontracted")]
+    snapshot = [dict(c) for c in candidates]
+    select_paper_sample(candidates)
+    assert [dict(c) for c in candidates] == snapshot
+    assert len(candidates) == 2  # no items appended or removed
+
+
+def test_select_paper_sample_summary_fields() -> None:
+    """Summary carries every field the build script's stdout depends on."""
+    candidates = [
+        _cand("in", "contracted", chapter=1, group="in|Haus"),
+        _cand("in", "uncontracted", chapter=1, group="in|Haus"),  # both forms → group with both
+        _cand("an", "uncontracted", chapter=2, group="an|Baum"),
+        _cand("um", "contracted", chapter=1, group="um|X"),  # dropped (um not shared)
+    ]
+    _, summary = select_paper_sample(candidates)
+    assert set(summary.keys()) == {
+        "candidate_total", "selected_total", "dropped_total",
+        "by_form", "dropped_by_form", "by_chapter",
+        "shared_prepositions", "minimal_pair_groups_in_sample",
+        "minimal_pair_groups_with_both_forms",
+    }
+    assert summary["candidate_total"] == 4
+    assert summary["selected_total"] == 3
+    assert summary["by_chapter"] == {"1": 2, "2": 1}
+    assert summary["minimal_pair_groups_in_sample"] == 2  # in|Haus, an|Baum
+    assert summary["minimal_pair_groups_with_both_forms"] == 1  # only in|Haus
+
+
+def test_validator_full_sample_flag_skips_pilot_balance(tmp_path: Path) -> None:
+    """A TSV whose contracted/uncontracted counts are NOT 10+10 must
+    pass with --full-sample and fail without it."""
+    validator = _load_validator()
+    # Build a real candidate set from the synthetic Ch.1 fixture corpus,
+    # then write it as a TSV. The synth corpus yields 3 contracted + 2
+    # uncontracted — neither count matches the 10+10 pilot expectation.
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    full_tsv = tmp_path / "full.tsv"
+    write_pilot_tsv(selected, full_tsv)
+
+    # Default mode: PILOT_IMBALANCE expected.
+    violations_default, _ = validator.validate_tsv(full_tsv)
+    rules_default = {v.rule for v in violations_default}
+    assert "PILOT_IMBALANCE" in rules_default
+
+    # Full-sample mode: must pass cleanly.
+    violations_full, summary_full = validator.validate_tsv(full_tsv, full_sample=True)
+    assert violations_full == []
+    assert summary_full["full_sample"] is True
+
+
+def test_validator_default_mode_still_enforces_pilot_balance(tmp_path: Path) -> None:
+    """Regression: default-mode validator still flags imbalance on a
+    non-pilot-sized TSV. Guards against accidentally removing the check."""
+    validator = _load_validator()
+    # Build candidates, then write a TSV without the balance override.
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    full_tsv = tmp_path / "full.tsv"
+    write_pilot_tsv(selected, full_tsv)
+
+    # Sanity: the synth corpus really does produce a non-10+10 file.
+    rows = full_tsv.read_text(encoding="utf-8").splitlines()
+    body = [r for r in rows[1:] if r]
+    assert len(body) != 20
+
+    violations, _ = validator.validate_tsv(full_tsv)
+    rules = {v.rule for v in violations}
+    assert "PILOT_IMBALANCE" in rules
+
+
+# --------------------------------------------------------------------- post-review
+# Tests for fixes landed in the xhigh code-review pass:
+#   - select_paper_sample / summarize_candidates: defensive de_form access
+#   - validator: empty-body check, OMITTED_WRONG_FORM with blank form,
+#     summary populated on early-return paths
+
+
+def test_select_paper_sample_tolerates_unknown_de_form() -> None:
+    """An unknown de_form value must not raise KeyError — it lands in
+    by_form / dropped_by_form as a new key with the canonical defaults
+    still present."""
+    candidates = [
+        _cand("in", "contracted"),
+        _cand("um", "unknown_form"),  # would have raised KeyError before fix
+    ]
+    selected, summary = select_paper_sample(candidates)
+    assert len(selected) == 1  # only "in" survives the prep filter
+    # by_form has the canonical keys (kept counts) plus the unknown form
+    # does not appear (the unknown_form candidate was dropped by prep, not
+    # by form). The drop is recorded under the unknown key.
+    assert summary["by_form"] == {"contracted": 1, "uncontracted": 0}
+    assert summary["dropped_by_form"] == {"contracted": 0, "uncontracted": 0,
+                                          "unknown_form": 1}
+
+
+def test_validator_empty_body_flagged(tmp_path: Path) -> None:
+    """A header-only TSV must be flagged even in --full-sample mode (where
+    PILOT_IMBALANCE is skipped and would otherwise let it pass silently)."""
+    validator = _load_validator()
+    # Write a header-only TSV by building a real one and stripping the body.
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    real_tsv = tmp_path / "real.tsv"
+    write_pilot_tsv(selected, real_tsv, scope_override="ch1_3_paper_sample")
+    lines = real_tsv.read_text(encoding="utf-8").splitlines()
+    header_only = tmp_path / "header_only.tsv"
+    header_only.write_text(lines[0] + "\n", encoding="utf-8")
+
+    violations, summary = validator.validate_tsv(header_only, full_sample=True)
+    rules = {v.rule for v in violations}
+    assert "EMPTY_BODY" in rules
+    # Summary is now populated even on the would-be-silent path.
+    assert summary["rows"] == 0
+    assert summary["violation_count"] >= 1
+    assert summary["full_sample"] is True
+
+
+def test_validator_omitted_blank_form_flagged(tmp_path: Path, monkeypatch) -> None:
+    """relation=omitted + blank form must be flagged OMITTED_WRONG_FORM
+    (the canonical state is form=omitted; a blank cell is wrong, not
+    merely unannotated)."""
+    validator = _load_validator()
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
+    pilot_tsv = _write_initial_pilot_tsv(tmp_path, validator)
+    rows = pilot_tsv.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+
+    en_rel_idx = cols.index("en_alignment_relation")
+    en_form_idx = cols.index("en_form")
+
+    body[0][en_rel_idx] = "omitted"
+    body[0][en_form_idx] = ""  # blank — used to slip through
+
+    pilot_tsv.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+    violations, _ = validator.validate_tsv(pilot_tsv)
+    rules = {v.rule for v in violations}
+    assert "OMITTED_WRONG_FORM" in rules
+
+
+def test_validator_summary_populated_on_header_mismatch(tmp_path: Path) -> None:
+    """Early-return paths (HEADER_MISMATCH, EMPTY_FILE) must populate the
+    summary so main()'s `violations: {summary.get('violation_count', 0)}`
+    doesn't print a misleading 'violations: 0' on a real failure."""
+    validator = _load_validator()
+    bad = tmp_path / "bad_header.tsv"
+    # Wrong header — fewer columns than ALL_TSV_COLUMNS.
+    bad.write_text("a\tb\tc\n1\t2\t3\n", encoding="utf-8")
+    violations, summary = validator.validate_tsv(bad, full_sample=True)
+    rules = {v.rule for v in violations}
+    assert "HEADER_MISMATCH" in rules
+    # Summary fields are populated; main() can read them.
+    assert summary["violation_count"] == len(violations)
+    assert summary["rows"] == 0
+    assert summary["full_sample"] is True
+    assert summary["by_rule"]["HEADER_MISMATCH"] == 1
+
+
+def test_validator_empty_file_summary_populated(tmp_path: Path) -> None:
+    """EMPTY_FILE return also populates the summary."""
+    validator = _load_validator()
+    empty = tmp_path / "empty.tsv"
+    empty.write_text("", encoding="utf-8")
+    violations, summary = validator.validate_tsv(empty)
+    rules = {v.rule for v in violations}
+    assert "EMPTY_FILE" in rules
+    assert summary["violation_count"] == len(violations)
+    assert summary["rows"] == 0
+    assert summary["by_rule"]["EMPTY_FILE"] == 1
+
+
+def test_write_pilot_tsv_scope_override(tmp_path: Path) -> None:
+    """scope_override parameter rewrites dataset_scope and the source-row
+    hash picks up the override (so the validator's hash check still passes)."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "scoped.tsv"
+    write_pilot_tsv(selected, out, scope_override="ch1_3_paper_sample")
+
+    # Every row carries the overridden scope.
+    rows = out.read_text(encoding="utf-8").splitlines()
+    cols = rows[0].split("\t")
+    scope_idx = cols.index("dataset_scope")
+    for r in rows[1:]:
+        assert r.split("\t")[scope_idx] == "ch1_3_paper_sample"
+
+    # Validator (full-sample mode) passes — hash check is consistent with
+    # the overridden scope.
+    violations, _ = validator.validate_tsv(out, full_sample=True)
+    assert not [v for v in violations if v.rule == "SOURCE_ROW_HASH_MISMATCH"]
