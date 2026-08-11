@@ -15,11 +15,17 @@ dist/
 # Data — all stages gitignored (raw PDFs, page PNGs, OCR JSONL, cleaned text, segmented, aligned, embeddings)
 data/
 
-# Models, vendor, artifacts, scratch
+# Models, vendor, artifacts, scratch.
+# vendor/ uses /* (not bare /) so specific files inside can be re-included
+# by negation below; the conll-extractor checkout itself stays ignored.
 models/
-vendor/
+vendor/*
 artifacts/
 tmp/
+
+# Tracked vendor manifest: pins the conll-extractor commit so CI can verify
+# the vendored checkout matches the validated revision.
+!vendor/conll-extractor.commit
 
 # Copyright-bound file types (defense in depth)
 *.pdf

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from hp_corpus.step4 import (
+    CONTRACTED_PREP_NORMALIZATION,
     EDITABLE_COLUMNS,
     PAPER_SHARED_PREPOSITIONS,
     SOURCE_COLUMNS,
@@ -728,10 +729,14 @@ def test_pilot_tsv_has_full_column_set_and_initial_blanks(tmp_path: Path) -> Non
     # All SOURCE_COLUMNS present in header
     for col in SOURCE_COLUMNS:
         assert col in rows[0]
-    # All EDITABLE_COLUMNS present but blank in initial state
+    # All EDITABLE_COLUMNS present. Initial-state semantics: every editable
+    # column is at its builder default (blank for most, "assumed_ok" for the
+    # two alignment_qc columns).
+    from hp_corpus.step4 import BUILDER_DEFAULT_EDITABLE
+
     for col in EDITABLE_COLUMNS:
         assert col in rows[0]
-        assert rows[0][col] == ""
+        assert rows[0][col] == BUILDER_DEFAULT_EDITABLE.get(col, ""), col
 
 
 def test_summary_no_token_text(tmp_path: Path) -> None:
@@ -1092,14 +1097,23 @@ def test_select_paper_sample_summary_fields() -> None:
         _cand("um", "contracted", chapter=1, group="um|X"),  # dropped (um not shared)
     ]
     _, summary = select_paper_sample(candidates)
+    # New canonical keys + backward-compat aliases.
     assert set(summary.keys()) == {
-        "candidate_total", "selected_total", "dropped_total",
-        "by_form", "dropped_by_form", "by_chapter",
-        "shared_prepositions", "minimal_pair_groups_in_sample",
+        "candidate_total",
+        "pool_total",
+        "ineligible_total",
+        "selected_total",  # backward-compat alias for pool_total
+        "dropped_total",  # backward-compat alias for ineligible_total
+        "by_form",
+        "dropped_by_form",
+        "by_chapter",
+        "shared_prepositions",
+        "minimal_pair_groups_in_sample",
         "minimal_pair_groups_with_both_forms",
     }
     assert summary["candidate_total"] == 4
-    assert summary["selected_total"] == 3
+    assert summary["pool_total"] == 3
+    assert summary["ineligible_total"] == 1
     assert summary["by_chapter"] == {"1": 2, "2": 1}
     assert summary["minimal_pair_groups_in_sample"] == 2  # in|Haus, an|Baum
     assert summary["minimal_pair_groups_with_both_forms"] == 1  # only in|Haus
@@ -1297,3 +1311,713 @@ def test_write_pilot_tsv_scope_override(tmp_path: Path) -> None:
     # the overridden scope.
     violations, _ = validator.validate_tsv(out, full_sample=True)
     assert not [v for v in violations if v.rule == "SOURCE_ROW_HASH_MISMATCH"]
+
+
+# --------------------------------------------------------------------- post-review-v2
+# Tests for the second review pass: contraction-table parity, commit pin,
+# fail-closed builder, new DE-candidate + alignment-QC columns, validator
+# overhaul (--annotation-pool, --require-complete, MISALIGNED_NOT_OMISSION,
+# TEMPLATE_VALID/UNANNOTATED), and the realignment-queue script.
+
+
+def test_vorm_normalizes_to_vor() -> None:
+    """vorm → vor (previously the table had vorn → vor, which is wrong:
+    the author's CONTRACTED list pins vorm, not vorn)."""
+    assert normalize_contracted_prep("vorm") == "vor"
+
+
+def test_untern_normalizes_to_unter() -> None:
+    """untern → unter (was missing from the table entirely)."""
+    assert normalize_contracted_prep("untern") == "unter"
+
+
+def test_untern_survives_eligibility_filter() -> None:
+    """A PP with surface form ``untern`` would normalize to ``unter``,
+    which IS in the 13-item paired inventory — so the row would survive
+    the eligibility filter (it is not in real Ch.1–3 data, but the
+    grammar must allow it)."""
+    assert normalize_contracted_prep("untern") in PAPER_SHARED_PREPOSITIONS
+
+
+def test_vorn_no_longer_in_table() -> None:
+    """The buggy ``vorn`` entry must be gone (the author list has
+    ``vorm``, not ``vorn``)."""
+    assert "vorn" not in CONTRACTED_PREP_NORMALIZATION
+    assert "vorm" in CONTRACTED_PREP_NORMALIZATION
+    assert "untern" in CONTRACTED_PREP_NORMALIZATION
+
+
+def test_inventory_remains_thirteen_prepositions() -> None:
+    """The eligibility filter still has exactly the 13 canonical paired
+    prepositions — not expanded."""
+    assert PAPER_SHARED_PREPOSITIONS == frozenset(
+        {"an", "auf", "aus", "bei", "durch", "für", "gegen",
+         "hinter", "in", "über", "unter", "von", "zu"}
+    )
+    assert len(PAPER_SHARED_PREPOSITIONS) == 13
+
+
+def test_contracted_table_parity_with_published_inventory() -> None:
+    """Every form in the pinned author CONTRACTED list normalizes via
+    :func:`normalize_contracted_prep` to its intended canonical base.
+
+    Uses the tracked fixture ``tests/fixtures/author_contracted.txt``
+    (a 26-form unique list mirroring the author's published inventory at
+    the pinned commit). Each line is ``form|expected_canonical`` so the
+    test verifies the exact mapping, not just prefix containment (some
+    contractions like ``am → an`` do not share a prefix with their base).
+    Runs without the vendor clone present.
+    """
+    fixture = Path(__file__).resolve().parent / "fixtures" / "author_contracted.txt"
+    assert fixture.exists(), f"fixture missing: {fixture}"
+    pairs: list[tuple[str, str]] = []
+    for raw in fixture.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        form, sep, expected = line.partition("|")
+        assert sep, f"malformed fixture line: {raw!r}"
+        pairs.append((form.strip(), expected.strip()))
+    assert pairs, "fixture is empty"
+    for form, expected in pairs:
+        assert form in CONTRACTED_PREP_NORMALIZATION, f"missing from table: {form}"
+        actual = normalize_contracted_prep(form)
+        assert actual == expected, (
+            f"{form} normalizes to {actual!r}, fixture says {expected!r}"
+        )
+
+
+def test_contracted_table_parity_with_vendor() -> None:
+    """Stronger parity test: imports the vendored author data module and
+    asserts every form in ``CONTRACTED`` is in our table.
+
+    Skipped when the vendor clone is absent (CI on a fresh checkout
+    runs the fixture-based test above instead). The fixture test above
+    covers the exact ``form → canonical`` mapping; this test only needs
+    to confirm the table's key set is a superset of the author's.
+    """
+    pytest.importorskip("conll_extractor.prepositions.data")
+    from conll_extractor.prepositions.data import CONTRACTED
+
+    for form in CONTRACTED:
+        assert form in CONTRACTED_PREP_NORMALIZATION, (
+            f"author contracted form {form!r} missing from our table"
+        )
+
+
+def test_vendor_commit_matches_pin() -> None:
+    """When the vendor clone is present, its HEAD must match the pin in
+    ``vendor/conll-extractor.commit``. Skipped when the vendor is absent."""
+    import subprocess
+
+    vendor_dir = Path(__file__).resolve().parent.parent / "vendor" / "conll-extractor"
+    pin_file = Path(__file__).resolve().parent.parent / "vendor" / "conll-extractor.commit"
+    if not vendor_dir.exists() or not (vendor_dir / ".git").exists():
+        pytest.skip("vendor/conll-extractor not cloned")
+    actual = subprocess.run(
+        ["git", "-C", str(vendor_dir), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    expected = pin_file.read_text(encoding="utf-8").strip()
+    assert actual == expected, (
+        f"vendor HEAD ({actual}) does not match pin ({expected}); "
+        f"the vendored checkout has drifted from the validated revision"
+    )
+
+
+def test_build_candidates_fails_on_missing_extraction_tsv(tmp_path: Path) -> None:
+    """Removing one extraction TSV must raise MissingInputsError."""
+    from hp_corpus.step4 import MissingInputsError
+
+    paths = _build_synth_repo(tmp_path)
+    (paths["extraction_dir"] / "hp1_de_ch01_contracted.tsv").unlink()
+    with pytest.raises(MissingInputsError, match="missing inputs"):
+        build_candidates(
+            extraction_dir=paths["extraction_dir"],
+            segmented_dir=paths["segmented_dir"],
+            aligned_dir=paths["aligned_dir"],
+            chapters=[1],
+        )
+
+
+def test_build_candidates_fails_on_missing_segmented_file(tmp_path: Path) -> None:
+    from hp_corpus.step4 import MissingInputsError
+
+    paths = _build_synth_repo(tmp_path)
+    (paths["segmented_dir"] / "hp1_zh_ch01.jsonl").unlink()
+    with pytest.raises(MissingInputsError, match="missing inputs"):
+        build_candidates(
+            extraction_dir=paths["extraction_dir"],
+            segmented_dir=paths["segmented_dir"],
+            aligned_dir=paths["aligned_dir"],
+            chapters=[1],
+        )
+
+
+def test_build_candidates_fails_on_missing_alignment_file(tmp_path: Path) -> None:
+    from hp_corpus.step4 import MissingInputsError
+
+    paths = _build_synth_repo(tmp_path)
+    (paths["aligned_dir"] / "hp1_de_zh_ch01.jsonl").unlink()
+    with pytest.raises(MissingInputsError, match="missing inputs"):
+        build_candidates(
+            extraction_dir=paths["extraction_dir"],
+            segmented_dir=paths["segmented_dir"],
+            aligned_dir=paths["aligned_dir"],
+            chapters=[1],
+        )
+
+
+def test_build_candidates_fails_on_header_only_tsv(tmp_path: Path) -> None:
+    """A header-only extraction TSV must be rejected — for Ch.1–3 every
+    form is known to be populated, so header-only signals an upstream
+    failure rather than a legitimately-empty chapter."""
+    from hp_corpus.step4 import MissingInputsError
+
+    paths = _build_synth_repo(tmp_path)
+    # Overwrite with a header-only file.
+    from hp_corpus.step4 import SOURCE_COLUMNS as _SC  # noqa: F401 (sanity)
+    fields = [
+        "sentence_id", "prep", "det", "noun",
+        "prep_token_id", "det_token_id", "noun_token_id",
+        "pp_token_start", "pp_token_end", "pp_surface", "in_filter",
+    ]
+    with open(paths["extraction_dir"] / "hp1_de_ch01_contracted.tsv", "w", encoding="utf-8") as f:
+        f.write("\t".join(fields) + "\n")
+    with pytest.raises(MissingInputsError, match="malformed"):
+        build_candidates(
+            extraction_dir=paths["extraction_dir"],
+            segmented_dir=paths["segmented_dir"],
+            aligned_dir=paths["aligned_dir"],
+            chapters=[1],
+        )
+
+
+def test_build_candidates_fails_on_empty_tsv(tmp_path: Path) -> None:
+    from hp_corpus.step4 import MissingInputsError
+
+    paths = _build_synth_repo(tmp_path)
+    (paths["extraction_dir"] / "hp1_de_ch01_uncontracted.tsv").write_text("", encoding="utf-8")
+    with pytest.raises(MissingInputsError, match="malformed"):
+        build_candidates(
+            extraction_dir=paths["extraction_dir"],
+            segmented_dir=paths["segmented_dir"],
+            aligned_dir=paths["aligned_dir"],
+            chapters=[1],
+        )
+
+
+def test_build_candidates_fails_on_unresolvable_de_segment_id(tmp_path: Path) -> None:
+    """An extraction TSV row pointing at a sentence id the segmented
+    JSONL doesn't have must raise UnresolvedSegmentIdError rather than
+    silently emitting an empty sentence-text row."""
+    from hp_corpus.step4 import UnresolvedSegmentIdError
+
+    paths = _build_synth_repo(tmp_path)
+    # Inject a row pointing at a sentence id that doesn't exist.
+    _write_extraction_tsv(
+        paths["extraction_dir"] / "hp1_de_ch01_contracted.tsv",
+        "contracted",
+        [
+            {
+                "sentence_id": "hp1_de_ch01_p9999_s999",  # not in segments
+                "prep": "im",
+                "noun": "Haus",
+                "prep_token_id": "1",
+                "noun_token_id": "2",
+                "pp_token_start": "1",
+                "pp_token_end": "2",
+                "pp_surface": "im Haus",
+                "in_filter": "Y",
+            },
+        ],
+    )
+    with pytest.raises(UnresolvedSegmentIdError, match="hp1_de_ch01_p9999_s999"):
+        build_candidates(
+            extraction_dir=paths["extraction_dir"],
+            segmented_dir=paths["segmented_dir"],
+            aligned_dir=paths["aligned_dir"],
+            chapters=[1],
+        )
+
+
+def test_builder_rejects_chapters_outside_1_2_3(tmp_path: Path) -> None:
+    """``--chapters`` other than [1, 2, 3] is rejected at the CLI layer."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "scripts" / "build_ch1_3_full_annotation.py"
+    spec = importlib.util.spec_from_file_location("build_ch1_3_full_annotation", script_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # parser.error() raises SystemExit in argparse.
+    with pytest.raises(SystemExit):
+        mod.main(["--chapters", "1"])
+
+
+def test_invalid_german_candidate_can_be_excluded(tmp_path: Path, monkeypatch) -> None:
+    """A row marked ``de_candidate_decision=exclude`` + reason passes
+    validation; no EN/ZH annotation required."""
+    validator = _load_validator()
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
+    pilot_tsv = _write_initial_pilot_tsv(tmp_path, validator)
+    rows = pilot_tsv.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+
+    decision_idx = cols.index("de_candidate_decision")
+    reason_idx = cols.index("de_exclusion_reason")
+    body[0][decision_idx] = "exclude"
+    body[0][reason_idx] = "extraction_error"
+
+    pilot_tsv.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+    violations, _ = validator.validate_tsv(pilot_tsv)
+    de_vs = [v for v in violations if "de_candidate" in v.message or "INCLUDE_HAS" in v.rule
+             or "EXCLUDE_NEEDS" in v.rule or "UNCERTAIN_" in v.rule]
+    assert de_vs == [], [str(v) for v in de_vs]
+
+
+def test_include_decision_must_have_blank_exclusion_reason(tmp_path: Path, monkeypatch) -> None:
+    validator = _load_validator()
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
+    pilot_tsv = _write_initial_pilot_tsv(tmp_path, validator)
+    rows = pilot_tsv.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+
+    decision_idx = cols.index("de_candidate_decision")
+    reason_idx = cols.index("de_exclusion_reason")
+    body[0][decision_idx] = "include"
+    body[0][reason_idx] = "not_target_pp"  # illegal for include
+
+    pilot_tsv.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+    violations, _ = validator.validate_tsv(pilot_tsv)
+    rules = {v.rule for v in violations}
+    assert "INCLUDE_HAS_EXCLUSION_REASON" in rules
+
+
+def test_uncertain_decision_requires_notes(tmp_path: Path, monkeypatch) -> None:
+    validator = _load_validator()
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
+    pilot_tsv = _write_initial_pilot_tsv(tmp_path, validator)
+    rows = pilot_tsv.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+
+    decision_idx = cols.index("de_candidate_decision")
+    notes_idx = cols.index("de_candidate_notes")
+    body[0][decision_idx] = "uncertain"
+    body[0][notes_idx] = ""  # missing required notes
+
+    pilot_tsv.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+    violations, _ = validator.validate_tsv(pilot_tsv)
+    rules = {v.rule for v in violations}
+    assert "UNCERTAIN_NEEDS_NOTES" in rules
+
+
+def test_misalignment_cannot_be_marked_as_omission(tmp_path: Path, monkeypatch) -> None:
+    """``en_alignment_qc=incorrect`` + ``en_alignment_relation=omitted``
+    is a hard violation in DEFAULT mode (the rule is always on)."""
+    validator = _load_validator()
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
+    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
+    pilot_tsv = _write_initial_pilot_tsv(tmp_path, validator)
+    rows = pilot_tsv.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+
+    qc_idx = cols.index("en_alignment_qc")
+    rel_idx = cols.index("en_alignment_relation")
+    form_idx = cols.index("en_form")
+    body[0][qc_idx] = "incorrect"
+    body[0][rel_idx] = "omitted"
+    body[0][form_idx] = "omitted"
+
+    pilot_tsv.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+    violations, _ = validator.validate_tsv(pilot_tsv)
+    rules = {v.rule for v in violations}
+    assert "MISALIGNED_NOT_OMISSION" in rules
+
+
+def test_initial_state_with_assumed_ok_default(tmp_path: Path) -> None:
+    """The builder-written ``assumed_ok`` default for {lang}_alignment_qc
+    does NOT count as annotation work — initial_state must remain True
+    for a fresh template."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "fresh.tsv"
+    write_pilot_tsv(selected, out)
+
+    violations, summary = validator.validate_tsv(out, full_sample=True)
+    assert summary["initial_state"] is True
+    # No annotation-level violations (structural ones are separate).
+    assert not [v for v in violations if v.rule not in ("PILOT_IMBALANCE",)]
+
+
+def test_validator_default_mode_prints_template_valid_unannotated(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A fresh template must NOT print bare ``OK``. It must print
+    ``TEMPLATE_VALID`` and ``state: UNANNOTATED``."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "fresh.tsv"
+    write_pilot_tsv(selected, out)
+
+    rc = validator.main([str(out), "--annotation-pool"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "TEMPLATE_VALID" in captured.out
+    assert "UNANNOTATED" in captured.out
+    # Bare "OK" must NOT appear on a fresh template.
+    lines = [ln.strip() for ln in captured.out.splitlines()]
+    assert "OK" not in lines
+
+
+def test_validator_require_complete_rejects_partial_annotation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A TSV with no rows marked complete must fail --require-complete."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "pool.tsv"
+    write_pilot_tsv(selected, out)
+
+    rc = validator.main([str(out), "--annotation-pool", "--require-complete"])
+    assert rc != 0  # nonzero: no rows are analytically complete.
+
+
+def _annotate_row_fully(
+    cols: list[str], row: list[str], *, en_text: str
+) -> list[str]:
+    """Helper: set every field needed for --require-complete on one row."""
+    def _set(name: str, val: str) -> None:
+        row[cols.index(name)] = val
+
+    # DE candidate
+    _set("de_candidate_decision", "include")
+    # EN: confirmed + direct + valid span + form + confidence.
+    _set("en_alignment_qc", "confirmed")
+    _set("en_alignment_relation", "direct")
+    # Span = whole en_aligned_text.
+    _set("en_span_text", en_text)
+    _set("en_char_ranges", f"[[0,{len(en_text)}]]")
+    _set("en_form", "definite")
+    _set("en_confidence", "high")
+    # ZH: confirmed + omitted (no counterpart).
+    _set("zh_alignment_qc", "confirmed")
+    _set("zh_alignment_relation", "omitted")
+    _set("zh_form", "omitted")
+    _set("zh_confidence", "high")
+    # Row status.
+    _set("annotation_status", "complete")
+    return row
+
+
+def test_validator_require_complete_accepts_full_synthetic_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A TSV where every row is include + complete + confirmed + valid
+    spans must pass --require-complete with exit 0."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "pool.tsv"
+    write_pilot_tsv(selected, out)
+
+    rows = out.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+    en_text_idx = cols.index("en_aligned_text")
+    for r in body:
+        en_text = r[en_text_idx]
+        _annotate_row_fully(cols, r, en_text=en_text)
+
+    out.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+
+    violations, summary = validator.validate_tsv(
+        out, full_sample=True, require_complete=True
+    )
+    assert violations == [], [str(v) for v in violations]
+    rollup = summary["rollup"]
+    assert rollup["completed"] == len(body)
+    assert rollup["blocked"] == 0
+    assert rollup["uncertain"] == 0
+    assert rollup["pending"] == 0
+
+
+def test_validator_require_complete_blocked_by_incorrect_alignment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A row with en_alignment_qc=incorrect cannot be analytically
+    complete, even if every other field is filled."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "pool.tsv"
+    write_pilot_tsv(selected, out)
+
+    rows = out.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+    en_text_idx = cols.index("en_aligned_text")
+    for r in body:
+        en_text = r[en_text_idx]
+        _annotate_row_fully(cols, r, en_text=en_text)
+    # Flip the first row's EN QC to incorrect.
+    body[0][cols.index("en_alignment_qc")] = "incorrect"
+    body[0][cols.index("en_alignment_notes")] = "wrong sentence paired"
+
+    out.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+
+    violations, summary = validator.validate_tsv(
+        out, full_sample=True, require_complete=True
+    )
+    rules = {v.rule for v in violations}
+    assert "REQUIRE_COMPLETE_NOT_CONFIRMED" in rules
+    assert summary["rollup"]["blocked"] >= 1
+
+
+def test_validator_require_complete_blocked_by_assumed_ok(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``assumed_ok`` is insufficient for completion — annotator must
+    promote to ``confirmed``."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "pool.tsv"
+    write_pilot_tsv(selected, out)
+
+    rows = out.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+    en_text_idx = cols.index("en_aligned_text")
+    for r in body:
+        en_text = r[en_text_idx]
+        _annotate_row_fully(cols, r, en_text=en_text)
+    # Reset both QC fields to assumed_ok (the builder default).
+    body[0][cols.index("en_alignment_qc")] = "assumed_ok"
+    body[0][cols.index("zh_alignment_qc")] = "assumed_ok"
+
+    out.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+
+    violations, summary = validator.validate_tsv(
+        out, full_sample=True, require_complete=True
+    )
+    rules = {v.rule for v in violations}
+    assert "REQUIRE_COMPLETE_NOT_CONFIRMED" in rules
+
+
+def test_validator_require_complete_requires_spans_for_direct(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """relation=direct without span_text + char_ranges fails --require-complete."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "pool.tsv"
+    write_pilot_tsv(selected, out)
+
+    rows = out.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+    en_text_idx = cols.index("en_aligned_text")
+    for r in body:
+        en_text = r[en_text_idx]
+        _annotate_row_fully(cols, r, en_text=en_text)
+    # Strip span/ranges from row 0 EN — relation=direct now has no span.
+    body[0][cols.index("en_span_text")] = ""
+    body[0][cols.index("en_char_ranges")] = ""
+
+    out.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+
+    violations, _ = validator.validate_tsv(
+        out, full_sample=True, require_complete=True
+    )
+    rules = {v.rule for v in violations}
+    assert "REQUIRE_COMPLETE_NO_SPAN" in rules
+    assert "REQUIRE_COMPLETE_NO_RANGES" in rules
+
+
+def test_validator_require_complete_excluded_row_not_counted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A row with decision=exclude is excluded from analytic completion;
+    it does NOT trigger REQUIRE_COMPLETE_NOT_COMPLETE."""
+    validator = _load_validator()
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    out = tmp_path / "pool.tsv"
+    write_pilot_tsv(selected, out)
+
+    rows = out.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+    # Mark the first row as excluded with a reason.
+    body[0][cols.index("de_candidate_decision")] = "exclude"
+    body[0][cols.index("de_exclusion_reason")] = "extraction_error"
+    # Fully annotate the rest.
+    en_text_idx = cols.index("en_aligned_text")
+    for r in body[1:]:
+        en_text = r[en_text_idx]
+        _annotate_row_fully(cols, r, en_text=en_text)
+
+    out.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+
+    violations, summary = validator.validate_tsv(
+        out, full_sample=True, require_complete=True
+    )
+    # No completion-related violations on the excluded row.
+    assert not [v for v in violations if v.rule == "REQUIRE_COMPLETE_NOT_COMPLETE"]
+    assert not [v for v in violations if v.rule == "REQUIRE_COMPLETE_DECISION_MISSING"]
+    # Rollup counts the excluded row correctly.
+    assert summary["rollup"]["excluded"] == 1
+
+
+def test_extract_realignment_queue_emits_flagged_rows(tmp_path: Path, capsys) -> None:
+    """Two rows flagged ``incorrect`` end up in the queue TSV; stdout
+    carries counts only (no novel text)."""
+    import importlib.util
+
+    repo = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=repo["extraction_dir"],
+        segmented_dir=repo["segmented_dir"],
+        aligned_dir=repo["aligned_dir"],
+        chapters=[1],
+    )
+    selected, _ = select_paper_sample(candidates)
+    pool_tsv = tmp_path / "pool.tsv"
+    write_pilot_tsv(selected, pool_tsv)
+
+    # Flag the EN side of every row as incorrect.
+    rows = pool_tsv.read_text(encoding="utf-8").splitlines()
+    header = rows[0]
+    cols = header.split("\t")
+    body = [r.split("\t") for r in rows[1:]]
+    qc_idx = cols.index("en_alignment_qc")
+    notes_idx = cols.index("en_alignment_notes")
+    for r in body:
+        r[qc_idx] = "incorrect"
+        r[notes_idx] = "synth reason"
+    pool_tsv.write_text(
+        header + "\n" + "\n".join("\t".join(r) for r in body) + "\n", encoding="utf-8"
+    )
+
+    queue_path = tmp_path / "queue.tsv"
+    script_path = (
+        Path(__file__).resolve().parent.parent
+        / "scripts"
+        / "extract_realignment_queue.py"
+    )
+    spec = importlib.util.spec_from_file_location("extract_realignment_queue", script_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    rc = mod.main([str(pool_tsv), "--output", str(queue_path)])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Stdout: counts only, no novel text.
+    assert "synth DE" not in captured.out
+    assert "synth EN" not in captured.out
+    # The queue TSV has the flagged rows.
+    qrows = list(csv.DictReader(queue_path.open(encoding="utf-8"), delimiter="\t"))
+    assert len(qrows) == len(body)
+    assert all(r["en_alignment_qc"] == "incorrect" for r in qrows)
+
+
+# --------------------------------------------------------------------- machine-proposal isolation
+
+def test_crosslingual_map_docstring_states_pp_shape_limitation() -> None:
+    """The module docstring must explicitly disclaim NP/pronoun/paraphrase/
+    omitted coverage so callers don't treat the output as exhaustive."""
+    from hp_corpus import crosslingual_map
+
+    doc = crosslingual_map.__doc__ or ""
+    assert "PP-shaped candidates only" in doc
+    assert "pronominal" in doc
+    assert "omitted" in doc
+    assert "never auto-populate" in doc.lower() or "auto-populate" in doc.lower()

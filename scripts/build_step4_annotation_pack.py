@@ -47,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--n-uncontracted", type=int, default=10)
     args = ap.parse_args(argv)
 
+    if sorted(args.chapters) != [1, 2, 3]:
+        ap.error(
+            "this builder is methodologically restricted to Ch.1–3; "
+            f"got --chapters {' '.join(str(c) for c in args.chapters)!r}"
+        )
+
     candidates = build_candidates(
         extraction_dir=args.extraction_dir,
         segmented_dir=args.segmented_dir,

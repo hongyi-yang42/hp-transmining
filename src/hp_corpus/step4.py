@@ -13,11 +13,13 @@ human-annotation pack:
 
 Methodology boundaries (see docs/METHODS.md):
 
-  * FILTER_CONTRACTED_123 / FILTER_PP are extraction QA only — they do
-    NOT define the Bremmers final sample.
+  * The output is a **Ch.1–3 paper-eligible annotation pool**, not the
+    paper's final 96 trilingual contexts. ``FILTER_CONTRACTED_123`` /
+    ``FILTER_PP`` are extraction QA only; they do not gate membership.
   * EN/ZH counterpart spans and forms are filled by a human annotator;
     this module never auto-translates or auto-classifies definiteness.
   * No weak/strong/uniqueness/familiarity labels are produced here.
+  * ``crosslingual_map`` proposals never auto-populate annotation fields.
 
 Alignment compatibility: the existing serializer names both sides
 ``en`` / ``zh`` regardless of the actual languages. We therefore
@@ -39,8 +41,26 @@ from typing import Any
 
 # --------------------------------------------------------------------- constants
 
-DATASET_SCOPE = "ch1_3_method_pilot"
+DATASET_SCOPE = "ch1_3_annotation_target"
 PAPER_FINAL_SAMPLE = False
+
+# Pinned vendor revision. The tracked file ``vendor/conll-extractor.commit``
+# is the source of truth; CI uses it to detect accidental upgrades of the
+# vendored checkout. The fallback default below is used only when the
+# manifest is missing (e.g., running tests against a partial checkout).
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_VENDOR_COMMIT_PATH = _REPO_ROOT / "vendor" / "conll-extractor.commit"
+_FALLBACK_COMMIT = "4a8a22030ac554d88d54566f68a9382197e43606"
+
+
+def _load_expected_commit() -> str:
+    try:
+        return _VENDOR_COMMIT_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return _FALLBACK_COMMIT
+
+
+EXPECTED_CONLL_EXTRACTOR_COMMIT = _load_expected_commit()
 
 SEGMENT_ID_LANG_RE = re.compile(r"^[a-z0-9]+_([a-z]{2,3})_ch\d{2}_p\d{4}_s\d{3}$")
 
@@ -69,8 +89,9 @@ CONTRACTED_PREP_NORMALIZATION: dict[str, str] = {
     "ums": "um",
     "unterm": "unter",
     "unters": "unter",
+    "untern": "unter",
     "vom": "von",
-    "vorn": "vor",
+    "vorm": "vor",
     "vors": "vor",
     "zum": "zu",
     "zur": "zu",
@@ -147,14 +168,24 @@ SOURCE_COLUMNS: tuple[str, ...] = (
 )
 
 EDITABLE_COLUMNS: tuple[str, ...] = (
-    # English annotation
+    # German-candidate confirmation. Annotator decides whether each row is
+    # a legitimate German PP for the annotation pool. ``author_resource_match``
+    # in SOURCE_COLUMNS stays extraction-QA-only and is NOT used for exclusion.
+    "de_candidate_decision",
+    "de_exclusion_reason",
+    "de_candidate_notes",
+    # English annotation: alignment QC first, then span/form/relation.
+    "en_alignment_qc",
+    "en_alignment_notes",
     "en_alignment_relation",
     "en_span_text",
     "en_char_ranges",
     "en_form",
     "en_confidence",
     "en_notes",
-    # Mandarin annotation
+    # Mandarin annotation: same block structure as EN.
+    "zh_alignment_qc",
+    "zh_alignment_notes",
     "zh_alignment_relation",
     "zh_span_text",
     "zh_char_ranges",
@@ -203,6 +234,33 @@ CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
 ANNOTATION_STATUSES = frozenset({"", "unstarted", "in_progress", "complete"})
 ADJUDICATION_STATUSES = frozenset({"", "pending", "adjudicated", "disputed"})
 
+# German-candidate decision vocab. ``de_candidate_decision`` is blank until
+# the annotator confirms. ``de_exclusion_reason`` is filled only when the
+# decision is ``exclude``.
+DE_CANDIDATE_DECISIONS = frozenset({"include", "exclude", "uncertain"})
+DE_EXCLUSION_REASONS = frozenset(
+    {"not_target_pp", "not_definite", "extraction_error", "duplicate", "other"}
+)
+
+# Alignment-QC vocab. ``assumed_ok`` is the builder-written default; the
+# annotator promotes to ``confirmed`` once a counterpart has been located
+# (or its absence verified). ``incorrect`` and ``uncertain`` route the row
+# to the realignment queue and block annotation completion.
+ALIGNMENT_QC_VALUES = frozenset({"assumed_ok", "confirmed", "incorrect", "uncertain"})
+
+# Builder-written default for the alignment-QC columns. Kept as a constant
+# so the writer, validator, and tests agree on what "initial state" means
+# now that one editable column is no longer blank by default.
+DEFAULT_ALIGNMENT_QC = "assumed_ok"
+
+# Columns the builder pre-fills with a default value (rather than blank).
+# Used by the validator's initial-state detection: a row is "unannotated"
+# iff every editable cell equals its builder default.
+BUILDER_DEFAULT_EDITABLE: dict[str, str] = {
+    "en_alignment_qc": DEFAULT_ALIGNMENT_QC,
+    "zh_alignment_qc": DEFAULT_ALIGNMENT_QC,
+}
+
 
 # --------------------------------------------------------------------- helpers
 
@@ -212,6 +270,33 @@ def lang_from_segment_id(segment_id: str) -> str | None:
     the canonical pattern."""
     m = SEGMENT_ID_LANG_RE.match(segment_id)
     return m.group(1) if m else None
+
+
+class Step4Error(Exception):
+    """Base class for Step 4 builder errors that must surface as nonzero exit."""
+
+
+class MissingInputsError(Step4Error):
+    """One or more required input files for the requested chapters are
+    missing, empty, or header-only. The builder refuses to emit a
+    partial-corpus TSV — every requested chapter must have a complete
+    input set so the annotation target is always cross-lingual.
+    """
+
+    def __init__(self, missing: list[str], *, kind: str = "missing"):
+        self.missing = missing
+        self.kind = kind
+        super().__init__(
+            f"{kind} inputs for requested chapters ({len(missing)}): " + ", ".join(missing)
+        )
+
+
+class UnresolvedSegmentIdError(Step4Error):
+    """A DE sentence_id from the extraction TSV does not resolve to a segment
+    in the segmented JSONL, or a target segment ID listed in an alignment
+    record does not resolve. Indicates an upstream pipeline integrity
+    failure; the builder refuses to emit a row with empty sentence text.
+    """
 
 
 def normalize_contracted_prep(prep: str) -> str:
@@ -486,6 +571,75 @@ def _status_for(de_id: str, alignments: dict[str, _AlignmentRecord], tgt_lang: s
     return "aligned"
 
 
+def _has_tsv_body(path: Path) -> bool:
+    """True if the TSV has at least one non-header row with any non-empty cell."""
+    with open(path, encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i == 0:
+                continue  # header
+            if line.strip():
+                return True
+    return False
+
+
+def _assert_inputs_present(
+    chapters: list[int],
+    *,
+    extraction_dir: Path,
+    segmented_dir: Path,
+    aligned_dir: Path,
+) -> None:
+    """Verify that every requested chapter has the full input set.
+
+    For Ch.1–3 (the only scope this builder supports today), each chapter
+    must contribute:
+
+      * ``hp1_de_ch{NN}_contracted.tsv`` — non-empty body
+      * ``hp1_de_ch{NN}_uncontracted.tsv`` — non-empty body
+      * ``hp1_{de,en,zh}_ch{NN}.jsonl`` — exists, non-empty
+      * ``hp1_de_{en,zh}_ch{NN}.jsonl`` — exists, non-empty
+
+    Header-only TSVs are rejected: for Ch.1–3 every form is known to be
+    populated, so a header-only file signals an upstream failure rather
+    than a legitimately-empty chapter. The future Ch.4–17 extension will
+    need an extraction-manifest mechanism to distinguish those cases
+    (out of scope here).
+    """
+    missing: list[str] = []
+    bad: list[str] = []
+
+    for ch in chapters:
+        for kind in ("contracted", "uncontracted"):
+            p = extraction_dir / f"hp1_de_ch{ch:02d}_{kind}.tsv"
+            if not p.exists():
+                missing.append(str(p))
+            elif p.stat().st_size == 0:
+                bad.append(f"{p} (empty)")
+            elif not _has_tsv_body(p):
+                bad.append(f"{p} (header-only)")
+        for lang in ("de", "en", "zh"):
+            p = segmented_dir / f"hp1_{lang}_ch{ch:02d}.jsonl"
+            if not p.exists():
+                missing.append(str(p))
+            elif p.stat().st_size == 0:
+                bad.append(f"{p} (empty)")
+        for tgt in ("en", "zh"):
+            p = aligned_dir / f"hp1_de_{tgt}_ch{ch:02d}.jsonl"
+            if not p.exists():
+                # Try reversed file name (DE↔EN file is named de_en regardless
+                # of which side the serializer put first).
+                alt = aligned_dir / f"hp1_{tgt}_de_ch{ch:02d}.jsonl"
+                if not alt.exists():
+                    missing.append(str(p))
+            elif p.stat().st_size == 0:
+                bad.append(f"{p} (empty)")
+
+    if missing:
+        raise MissingInputsError(missing, kind="missing")
+    if bad:
+        raise MissingInputsError(bad, kind="malformed")
+
+
 def build_candidates(
     *,
     extraction_dir: Path,
@@ -497,8 +651,20 @@ def build_candidates(
 
     Each candidate is a German PP occurrence with full DE/EN/ZH context
     plus alignment metadata. Pilot selection happens later.
+
+    Raises :class:`MissingInputsError` if any requested chapter is missing
+    a required input file, and :class:`UnresolvedSegmentIdError` if a
+    DE sentence_id from the extraction TSV cannot be resolved against the
+    segmented JSONL. Both errors signal upstream integrity failures; the
+    builder never emits a partial-corpus or empty-sentence TSV.
     """
     chapters = list(chapters)
+    _assert_inputs_present(
+        chapters,
+        extraction_dir=extraction_dir,
+        segmented_dir=segmented_dir,
+        aligned_dir=aligned_dir,
+    )
 
     de_segments = _load_segments(segmented_dir, "de", chapters)
     en_segments = _load_segments(segmented_dir, "en", chapters)
@@ -517,12 +683,14 @@ def build_candidates(
                 sent_id = row["sentence_id"]
                 de_seg = de_segments.get(sent_id)
                 if de_seg is None:
-                    # No segment text — this is a real data-integrity issue. We
-                    # still emit the candidate so it can be inspected, but mark
-                    # sentence text as empty and the validator will surface it.
-                    de_sentence_text = ""
-                else:
-                    de_sentence_text = de_seg.text
+                    # Data-integrity failure — extraction TSV references a
+                    # sentence the segmented JSONL doesn't have. Fail loudly
+                    # rather than emit a row with empty sentence text.
+                    raise UnresolvedSegmentIdError(
+                        f"DE sentence id {sent_id!r} (chapter {ch}, {kind}) "
+                        f"is not present in {segmented_dir}/hp1_de_ch{ch:02d}.jsonl"
+                    )
+                de_sentence_text = de_seg.text
 
                 prep_surface = row["prep"]
                 prep_normalized = normalize_contracted_prep(prep_surface)
@@ -737,29 +905,40 @@ class InsufficientCandidatesError(Exception):
         )
 
 
-def select_paper_sample(
+def select_ch1_3_annotation_pool(
     candidates: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Apply the paper's preposition-inventory filter (Bremmers et al. 2022, §2.2.1).
+    """Build the Ch.1–3 paper-eligible annotation pool.
 
-    Keeps candidates whose ``de_prep_normalized`` is in
-    :data:`PAPER_SHARED_PREPOSITIONS` — i.e. the canonical preposition
-    has both a contracted form and an uncontracted form in the language.
+    Applies the paper's preposition-inventory filter (Bremmers et al. 2022,
+    §2.2.1): keeps candidates whose ``de_prep_normalized`` is in
+    :data:`PAPER_SHARED_PREPOSITIONS` — i.e. the canonical preposition has
+    both a contracted form and an uncontracted form in the language.
 
-    For Ch.1-3 the paper keeps every surviving contracted and
-    uncontracted occurrence; the Ch.4+ minimal-pair restriction
-    (contracted PPs in Ch.4+ are kept only when an uncontracted
+    The result is the **annotation pool**, not the paper's final 96.
+    Membership in the 96 is a downstream human decision; this function only
+    removes rows whose preposition is structurally ineligible (e.g.
+    contracted ``ums`` / ``vorm`` — ``um`` and ``vor`` are not in the
+    paper's PREPOSITIONS list, so they cannot pair with an uncontracted
+    form).
+
+    For Ch.1–3 every surviving occurrence is kept; the Ch.4+ minimal-pair
+    restriction (contracted PPs in Ch.4+ are kept only when an uncontracted
     counterpart with the same canonical preposition + head noun lemma
     exists) does NOT apply here because Ch.4+ is out of scope. The
-    minimal-pair grouping is still computed (see
-    :data:`minimal_pair_groups_with_both_forms` in the summary) so the
+    minimal-pair grouping is still computed
+    (see :data:`minimal_pair_groups_with_both_forms` in the summary) so the
     Ch.4+ extension can resume from this output without re-deriving it.
 
-    Returns ``(selected, summary)``. Does not mutate the input list or
-    the candidate dicts; the selected list holds references to the same
-    dict objects.
+    Returns ``(pool, summary)``. Does not mutate the input list or the
+    candidate dicts; the pool holds references to the same dict objects.
+
+    The summary uses the keys ``pool_total`` and ``ineligible_total`` (not
+    ``selected_total`` / ``dropped_total``) to avoid implying the result is
+    the paper's final sample. The old names remain available as aliases for
+    backward compatibility.
     """
-    selected: list[dict[str, Any]] = []
+    pool: list[dict[str, Any]] = []
     by_form: dict[str, int] = {"contracted": 0, "uncontracted": 0}
     dropped_by_form: dict[str, int] = {"contracted": 0, "uncontracted": 0}
     by_chapter: dict[int, int] = {}
@@ -768,7 +947,7 @@ def select_paper_sample(
     selected_groups: dict[str, set[str]] = {}
     for c in candidates:
         if c["de_prep_normalized"] in PAPER_SHARED_PREPOSITIONS:
-            selected.append(c)
+            pool.append(c)
             by_form[c["de_form"]] = by_form.get(c["de_form"], 0) + 1
             by_chapter[c["chapter"]] = by_chapter.get(c["chapter"], 0) + 1
             selected_groups.setdefault(c["minimal_pair_group"], set()).add(c["de_form"])
@@ -779,8 +958,11 @@ def select_paper_sample(
 
     summary = {
         "candidate_total": len(candidates),
-        "selected_total": len(selected),
-        "dropped_total": len(candidates) - len(selected),
+        "pool_total": len(pool),
+        "ineligible_total": len(candidates) - len(pool),
+        # Backward-compat aliases (deprecated; new code should use the keys above).
+        "selected_total": len(pool),
+        "dropped_total": len(candidates) - len(pool),
         "by_form": by_form,
         "dropped_by_form": dropped_by_form,
         "by_chapter": {str(k): v for k, v in sorted(by_chapter.items())},
@@ -788,7 +970,13 @@ def select_paper_sample(
         "minimal_pair_groups_in_sample": len(selected_groups),
         "minimal_pair_groups_with_both_forms": groups_with_both,
     }
-    return selected, summary
+    return pool, summary
+
+
+# Backward-compat alias. New code should call
+# :func:`select_ch1_3_annotation_pool`; this name is retained because
+# earlier tests and scripts still reference it.
+select_paper_sample = select_ch1_3_annotation_pool
 
 
 # --------------------------------------------------------------------- writers
@@ -812,7 +1000,9 @@ def write_pilot_tsv(
     scope_override: str | None = None,
 ) -> Path:
     """Write the human-annotation TSV. Source columns are written from the
-    candidate dict; editable columns are blank (waiting for the annotator).
+    candidate dict; editable columns are blank (waiting for the annotator)
+    except for builder-initialized QC defaults (``{en,zh}_alignment_qc
+    = assumed_ok``) — see :data:`BUILDER_DEFAULT_EDITABLE`.
 
     The source-row SHA-256 is recomputed immediately before writing each row
     so it always reflects the candidate's current source-column state.
@@ -850,6 +1040,12 @@ def write_pilot_tsv(
                     else:
                         val = str(val)
                     row[col] = val
+                elif col in BUILDER_DEFAULT_EDITABLE:
+                    # Builder-initialized editable default (currently only
+                    # {en,zh}_alignment_qc = assumed_ok). Annotators may
+                    # overwrite this cell; the validator's initial-state
+                    # detection treats the default as equivalent to blank.
+                    row[col] = BUILDER_DEFAULT_EDITABLE[col]
                 else:
                     row[col] = ""
             w.writerow(row)

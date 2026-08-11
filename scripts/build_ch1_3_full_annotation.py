@@ -1,14 +1,19 @@
-"""Build the full Ch.1-3 Bremmers-sample annotation TSV.
+"""Build the Ch.1–3 annotation-target TSV.
 
 Applies the paper's preposition-inventory filter (Bremmers et al. 2022,
-§2.2.1) to every extracted German PP from Ch.1-3 and writes the full
-selected set as a human-annotation TSV. The 10+10 method pilot produced
-by ``build_step4_annotation_pack.py`` is a strict subset of this file.
+§2.2.1) to every extracted German PP from Ch.1–3 and writes the surviving
+pool as a human-annotation TSV. The 10+10 method pilot produced by
+``build_step4_annotation_pack.py`` is a strict subset of this file.
 
 This script is additive to ``build_step4_annotation_pack.py``: that
 script emits ``all_candidates.jsonl`` + the 20-row pilot TSV; this one
-emits the full annotation target. The two coexist — annotate the full
-TSV going forward, keep the pilot TSV for method-record purposes.
+emits the annotation target. The two coexist — annotate the target TSV
+going forward, keep the pilot TSV for method-record purposes.
+
+**The output is a Ch.1–3 paper-eligible annotation pool, not the paper's
+final 96 trilingual contexts.** The 96 are hand-selected from the full
+novel; this pool is every Ch.1–3 occurrence whose canonical preposition
+is in the paper's 13-item paired inventory.
 
 Stdout carries aggregate counts only — no surface forms, lemmas,
 segment IDs, or sentence text. Detailed output goes to
@@ -32,18 +37,16 @@ from pathlib import Path
 from hp_corpus.step4 import (
     PAPER_TABLE_A,
     build_candidates,
-    select_paper_sample,
+    select_ch1_3_annotation_pool,
     summarize_candidates,
     write_pilot_tsv,
     write_summary_json,
 )
 
-# Scope label written into every row of the full TSV. ``DATASET_SCOPE``
-# from step4.py is "ch1_3_method_pilot"; we override it here because the
-# full TSV is no longer a pilot. The override is applied inside
-# ``write_pilot_tsv`` (alongside the existing source_row_sha256 mutation
-# pattern) so the script does not reach into candidate dicts directly.
-FULL_SAMPLE_SCOPE = "ch1_3_paper_sample"
+# Scope label written into every row of the annotation-target TSV.
+# This is the operational pool label; ``paper_final_sample`` on every row
+# stays False (the pool is not the paper's hand-picked 96).
+ANNOTATION_TARGET_SCOPE = "ch1_3_annotation_target"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,47 +58,53 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--chapters", type=int, nargs="+", default=[1, 2, 3])
     args = ap.parse_args(argv)
 
+    if sorted(args.chapters) != [1, 2, 3]:
+        ap.error(
+            "this builder is methodologically restricted to Ch.1–3; "
+            f"got --chapters {' '.join(str(c) for c in args.chapters)!r}"
+        )
+
     candidates = build_candidates(
         extraction_dir=args.extraction_dir,
         segmented_dir=args.segmented_dir,
         aligned_dir=args.aligned_dir,
         chapters=args.chapters,
     )
-    selected, sample_summary = select_paper_sample(candidates)
+    pool, pool_summary = select_ch1_3_annotation_pool(candidates)
 
-    # ``selected`` arrives in build_candidates' stable-sort order
-    # (chapter, sentence_id, token_start, token_end); select_paper_sample
-    # preserves that order, so no re-sort is needed.
+    # ``pool`` arrives in build_candidates' stable-sort order
+    # (chapter, sentence_id, token_start, token_end); the selector preserves
+    # that order, so no re-sort is needed.
     out_tsv = args.output_dir / "ch1_3_full_annotation.tsv"
     out_summary = args.output_dir / "ch1_3_full_annotation.summary.json"
-    write_pilot_tsv(selected, out_tsv, scope_override=FULL_SAMPLE_SCOPE)
+    write_pilot_tsv(pool, out_tsv, scope_override=ANNOTATION_TARGET_SCOPE)
 
     # Reuse summarize_candidates for the candidate-level stats (missing
     # alignment, multi-sentence alignment, minimal-pair groups), then
-    # attach the paper-sample view and the Table A comparison.
+    # attach the pool view and the Table A comparison.
     cand_summary = summarize_candidates(candidates, None, None)
-    n_c = sample_summary["by_form"]["contracted"]
-    n_u = sample_summary["by_form"]["uncontracted"]
-    total = sample_summary["selected_total"]
+    n_c = pool_summary["by_form"]["contracted"]
+    n_u = pool_summary["by_form"]["uncontracted"]
+    total = pool_summary["pool_total"]
     summary = {
-        "dataset_scope": FULL_SAMPLE_SCOPE,
-        "candidate_total": sample_summary["candidate_total"],
-        "selected_total": total,
-        "dropped_total": sample_summary["dropped_total"],
-        "dropped_by_form": sample_summary["dropped_by_form"],
-        "by_form_selected": sample_summary["by_form"],
-        "by_chapter_selected": sample_summary["by_chapter"],
-        "shared_prepositions": sample_summary["shared_prepositions"],
-        "minimal_pair_groups_in_sample": sample_summary["minimal_pair_groups_in_sample"],
+        "dataset_scope": ANNOTATION_TARGET_SCOPE,
+        "candidate_total": pool_summary["candidate_total"],
+        "pool_total": total,
+        "ineligible_total": pool_summary["ineligible_total"],
+        "ineligible_by_form": pool_summary["dropped_by_form"],
+        "by_form_in_pool": pool_summary["by_form"],
+        "by_chapter_in_pool": pool_summary["by_chapter"],
+        "shared_prepositions": pool_summary["shared_prepositions"],
+        "minimal_pair_groups_in_pool": pool_summary["minimal_pair_groups_in_sample"],
         "minimal_pair_groups_with_both_forms": (
-            sample_summary["minimal_pair_groups_with_both_forms"]
+            pool_summary["minimal_pair_groups_with_both_forms"]
         ),
         "alignment_quality": {
             "missing_alignment": cand_summary["missing_alignment"],
             "multi_sentence_alignment": cand_summary["multi_sentence_alignment"],
         },
         "table_a": {
-            "ours_ch1_3_subset": {
+            "ch1_3_pool": {
                 "contracted": n_c,
                 "uncontracted": n_u,
                 "total": total,
@@ -104,30 +113,31 @@ def main(argv: list[str] | None = None) -> int:
             },
             "paper_full_novel": PAPER_TABLE_A,
             "note": (
-                "Ch.1-3 is a strict subset of the paper's full-novel sample; "
-                "the count difference reflects chapters outside our current "
-                "scope (Ch.4-17), not methodology drift."
+                "Ch.1–3 paper-eligible annotation pool; not the paper's final "
+                "96. The paper's 96 is hand-selected from the full novel; this "
+                "pool is every Ch.1–3 occurrence whose canonical preposition is "
+                "in the paper's 13-item paired inventory."
             ),
         },
     }
     write_summary_json(summary, out_summary)
 
     # ----- stdout: aggregate counts only -----
-    print(f"candidates total: {sample_summary['candidate_total']}")
+    print(f"candidates total: {pool_summary['candidate_total']}")
     print(
-        f"  dropped (canonical prep not in both inventories): "
-        f"{sample_summary['dropped_total']} {sample_summary['dropped_by_form']}"
+        f"  ineligible (canonical prep not in both inventories): "
+        f"{pool_summary['ineligible_total']} {pool_summary['dropped_by_form']}"
     )
-    print(f"selected (Ch.1-3 paper sample): {total}")
+    print(f"pool (Ch.1–3 annotation target): {total}")
     print(f"  contracted:   {n_c}")
     print(f"  uncontracted: {n_u}")
-    print(f"  by chapter: {sample_summary['by_chapter']}")
+    print(f"  by chapter: {pool_summary['by_chapter']}")
     print(
-        f"  minimal-pair groups in sample: "
-        f"{sample_summary['minimal_pair_groups_in_sample']} "
-        f"({sample_summary['minimal_pair_groups_with_both_forms']} with both forms)"
+        f"  minimal-pair groups in pool: "
+        f"{pool_summary['minimal_pair_groups_in_sample']} "
+        f"({pool_summary['minimal_pair_groups_with_both_forms']} with both forms)"
     )
-    print("Table A (German form distribution, % of Ch.1-3 subset):")
+    print("Table A (German form distribution, % of Ch.1–3 pool):")
     pct_c = round(100 * n_c / total, 1) if total else 0.0
     pct_u = round(100 * n_u / total, 1) if total else 0.0
     print(f"  contracted:   {n_c} ({pct_c}%)")
