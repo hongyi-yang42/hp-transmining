@@ -8,13 +8,26 @@ extraction from CoNLL-U plus a transparent scoring rule.
 Methodology boundaries (see docs/METHODS.md):
 
   * Output is a **machine proposal**, never a definitive annotation.
-    The pilot TSV's human-annotation columns stay blank; this module's
-    results live in a separate JSONL so a human annotator can compare.
+    The annotation-target TSV's human-editable columns stay at builder
+    defaults; this module's results live in a separate JSONL so a human
+    annotator can compare. The proposal must never auto-populate gold
+    annotation fields.
+  * The matcher proposes **PP-shaped candidates only** — an ADP token
+    with ``deprel=case`` plus its head and modifiers. It cannot surface
+    legitimate counterparts that take other shapes: bare NPs, pronominal
+    references, paraphrastic constructions, or genuinely omitted
+    counterparts. Absence of a high-scoring candidate therefore does
+    not imply the alignment lacks a counterpart — the annotator is the
+    final arbiter.
   * Scoring is rule-based and deterministic: prep-semantics match,
     proper-name overlap, position-in-sentence, and a small bonus from
     sentence-alignment confidence. No neural translation, no embeddings.
   * When no candidate clears the threshold, the mapping is recorded as
     ``unmappable`` with a reason — never silently dropped.
+  * Scoring thresholds and weights (``MATCH_THRESHOLD``,
+    ``CANDIDATE_THRESHOLD``, signal weights, alignment-bonus cutoffs)
+    are explicit but **not tuned in the current pass**. Calibration is
+    deferred to a future methodology pass.
 
 The CoNLL-U walk relies only on the parts of UD that are stable across
 Stanza outputs: token id, form, lemma, upos, head, deprel. MWT range

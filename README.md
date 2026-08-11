@@ -4,7 +4,7 @@
 
 Translation mining extracts grammatical categories (here: definiteness) from parallel translations rather than from manual annotation. The three editions — Scholastic 1998 (English), People's Lit. 2018 (Chinese, Su Nong), and Carlsen 1998 first edition (German, Klaus Fritz) — are used to build a **machine-aligned** DE/EN/ZH corpus on which to run the paper's PP extractor; alignments and extracted candidates currently await human QC.
 
-**Current scope (Ch.1–3):** a 241-occurrence machine candidate pool on the German side (130 contracted + 111 uncontracted). The paper's final 96 trilingual contexts have **not** yet been recovered occurrence-by-occurrence, and the EN/ZH counterparts require human annotation (see `docs/STEP4_ANNOTATION.md`).
+**Current scope (Ch.1–3):** a 241-occurrence German paper-eligible annotation pool (130 contracted + 111 uncontracted). This is the Ch.1–3 annotation target, **not** the paper's final 96 trilingual contexts — the 96 are hand-selected from the full novel. EN/ZH counterparts require human annotation (see `docs/STEP4_ANNOTATION.md`).
 
 ## What this project does
 
@@ -44,7 +44,7 @@ Requires Python 3.11–3.12 (PaddlePaddle has no wheels for 3.13/3.14) and [`uv`
 uv venv -p 3.12
 uv pip install -e ".[ocr,align,parse,dev]"
 git clone https://github.com/time-in-translation/conll-extractor.git vendor/conll-extractor
-cd vendor/conll-extractor && git checkout 4a8a220 && cd ../..   # pin to the validated revision
+cd vendor/conll-extractor && git checkout 4a8a220 && cd ../..   # pin to the validated revision (recorded in vendor/conll-extractor.commit)
 ```
 
 `src/hp_corpus/align.py` ships its own dynamic-programming aligner — no `vecalign` checkout is needed.

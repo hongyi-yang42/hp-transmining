@@ -1,0 +1,36 @@
+# Author-published CONTRACTED list at
+# time-in-translation/conll-extractor @ 4a8a22030ac554d88d54566f68a9382197e43606
+# (conll_extractor/prepositions/data.py). Pinned here as a fixture so the
+# parity test can run on CI checkouts that lack the vendor clone. This is a
+# short list of German grammatical forms — not corpus text.
+#
+# Format: one form per line as ``form|expected_canonical``. The canonical
+# base is what each contracted form normalizes to via the project's
+# normalize_contracted_prep() (which mirrors the author's table).
+# Comments and blank lines are ignored.
+zum|zu
+zur|zu
+ans|an
+am|an
+aufs|auf
+aufm|auf
+fürs|für
+fürn|für
+fürm|für
+vom|von
+gegens|gegen
+ausm|aus
+im|in
+ins|in
+durchs|durch
+übers|über
+übern|über
+überm|über
+untern|unter
+unters|unter
+unterm|unter
+beim|bei
+hinters|hinter
+hinterm|hinter
+ums|um
+vorm|vor

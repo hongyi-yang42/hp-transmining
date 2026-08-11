@@ -92,7 +92,12 @@ def test_no_tracked_pdf_or_png_or_jsonl(repo_root: Path) -> None:
 
 
 def test_no_tracked_data_path(repo_root: Path) -> None:
-    """Nothing under data/, models/, vendor/, artifacts/, tmp/ should be tracked."""
+    """Nothing under data/, models/, vendor/, artifacts/, tmp/ should be tracked.
+
+    The one exception is ``vendor/conll-extractor.commit`` — a single-line
+    text file pinning the vendored extractor commit. The vendor checkout
+    itself stays gitignored.
+    """
     result = subprocess.run(
         ["git", "ls-files"],
         capture_output=True,
@@ -101,5 +106,10 @@ def test_no_tracked_data_path(repo_root: Path) -> None:
     )
     files = result.stdout.splitlines()
     forbidden_prefixes = ("data/", "models/", "vendor/", "artifacts/", "tmp/")
-    bad = [f for f in files if any(f.startswith(p) for p in forbidden_prefixes)]
+    allowed = {"vendor/conll-extractor.commit"}
+    bad = [
+        f
+        for f in files
+        if any(f.startswith(p) for p in forbidden_prefixes) and f not in allowed
+    ]
     assert not bad, f"Tracked files in gitignored directories: {bad}"

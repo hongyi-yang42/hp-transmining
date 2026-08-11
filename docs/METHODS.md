@@ -26,12 +26,30 @@ Hits are validated against `FILTER_CONTRACTED_123` and `FILTER_PP` from `conll_e
 
 **What a Step 4 datapoint is.** A *specific German PP occurrence* — a token range inside one sentence — together with the EN and ZH sentence(s) aligned to that German sentence. The annotator's task is to identify, inside each aligned sentence, the linguistic expression that corresponds to the German PP and to record its observable form.
 
-**What Step 4 is not.**
+**What the Step 4 TSV is — and is not.**
 
+- The output TSV is a **Ch.1–3 paper-eligible annotation pool**. Every surviving occurrence whose canonical preposition is in the paper's 13-item paired inventory is included; nothing is hand-picked.
+- It is **not** the paper's final 96 trilingual contexts. The 96 are hand-selected from the full novel; membership in the 96 is a downstream human decision, not a property of any row in this TSV. `paper_final_sample=false` on every row makes this explicit.
 - It is **not** a (preposition, noun) type-level analysis. Two occurrences of `im Haus` in the same sentence are two datapoints.
-- It is **not** the paper's final 96-row sample. `FILTER_CONTRACTED_123` and `FILTER_PP` are extraction QA filters only; they do not gate the annotation pack.
-- It is **not** an automatic translation or definiteness classifier. EN/ZH counterpart spans and form labels are filled by a human annotator. This module never auto-translates or auto-classifies.
+- `FILTER_CONTRACTED_123` and `FILTER_PP` are extraction QA filters; they appear as the `author_resource_match` source column for visibility but do not gate membership in the pool.
+- It is **not** an automatic translation or definiteness classifier. EN/ZH counterpart spans and form labels are filled by a human annotator. The builder never auto-translates or auto-classifies; `crosslingual_map` proposals live in a separate JSONL and never auto-populate annotation fields.
 - It does **not** assign weak/strong definiteness, uniqueness, or familiarity. Only observable surface form is recorded.
+
+### The 13-item operational inventory
+
+The pool is restricted to canonical prepositions that appear in **both** of the author's published lists: the contracted `CONTRACTED` list (27 surface forms) and the uncontracted `PREPOSITIONS` list (13 forms). The intersection is 13 canonical prepositions: `an, auf, aus, bei, durch, für, gegen, hinter, in, über, unter, von, zu`. Contracted `ums` and `vorm` exist in German but are excluded because `um` and `vor` are not in `PREPOSITIONS`. This 13-item set is the operational paired inventory; it is not a universal German-grammar inventory.
+
+The contraction table in `src/hp_corpus/step4.py` is pinned to the vendored `time-in-translation/conll-extractor` commit recorded in `vendor/conll-extractor.commit`. Two regression tests guard parity: a fixture-based test (runs on every checkout) and a vendor-based test (runs only when the vendor clone is present).
+
+### Sentence alignment
+
+The sentence alignments feeding Step 4 are produced by `src/hp_corpus/align.py` (e5-base embeddings + dynamic programming). They are **assumed correct initially** — the builder writes `{lang}_alignment_qc = assumed_ok` on every row — but checked opportunistically by the annotator while locating counterparts. The annotator may promote the QC flag to `confirmed` (after verifying a counterpart or its absence), or flag it as `incorrect` / `uncertain`, which routes the row to a realignment queue.
+
+Misalignment and omission are distinct: `omitted` is reserved for "the **correctly-aligned** target context genuinely contains no counterpart". `incorrect` + `omitted` together is a hard validation error (`MISALIGNED_NOT_OMISSION`); a row in doubt must be flagged for realignment, not encoded as omission.
+
+### Builder input discipline
+
+For Ch.1–3 every requested chapter must contribute a full input set: both contracted and uncontracted extraction TSVs (non-empty body), DE/EN/ZH segmented JSONL, and DE–EN / DE–ZH alignment JSONL. Header-only, empty, or missing inputs raise `MissingInputsError`; an unresolved DE segment id raises `UnresolvedSegmentIdError`. The builder never emits a partial-corpus TSV. The header-only rule is scoped to Ch.1–3; the future Ch.4–17 extension will need an extraction-manifest mechanism to distinguish legitimately-empty chapters from missed runs (out of scope here).
 
 ### Module layout
 
