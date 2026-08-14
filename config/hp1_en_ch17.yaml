@@ -1,0 +1,48 @@
+book: hp1
+lang: en
+
+pdf_path: data/raw/hp1_en.pdf
+total_pages: 327
+has_text_layer: true
+
+title: "Harry Potter and the Sorcerer's Stone"
+author: "J.K. Rowling"
+publisher: "Scholastic"
+edition: "First American Edition"
+year: 1998
+isbn: "0-590-35340-3"
+
+# Chapter 17 page range — located by scanning the text layer: the opener
+# page carries a letter-spaced chapter line (y0≈39) above the title block
+# (y0≈180-245); even pages carry a "CHAPTER SEVENTEEN" running header, odd
+# pages the caps title. Verified against anchors Ch.1=p.13, Ch.2=p.30,
+# Ch.3=p.43. Novel text ends on p.321 (p.322 empty; p.323 is the
+# colophon), so Ch.17 = pp.300-321.
+chapter:
+  number: 17
+  start_page: 300
+  end_page: 321
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: pymupdf
+  lang: en
+
+clean:
+  header_patterns:
+    - "Harry Potter"
+    - "C H A P T E R S E V E N T E E N"
+    - "THE MAN WITH TWO FACES"
+    - "CHAPTER SEVENTEEN"
+  remove_page_numbers: true
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['"', '"']
+
+segment:
+  lang: en
+  split_on: ['.', '!', '?']
+  abbreviations: ['Mr.', 'Mrs.', 'Dr.', 'St.', 'etc.', 'Prof.']

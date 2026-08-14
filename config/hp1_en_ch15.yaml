@@ -1,0 +1,47 @@
+book: hp1
+lang: en
+
+pdf_path: data/raw/hp1_en.pdf
+total_pages: 327
+has_text_layer: true
+
+title: "Harry Potter and the Sorcerer's Stone"
+author: "J.K. Rowling"
+publisher: "Scholastic"
+edition: "First American Edition"
+year: 1998
+isbn: "0-590-35340-3"
+
+# Chapter 15 page range — located by scanning the text layer: the opener
+# page carries a letter-spaced chapter line (y0≈39) above the title block
+# (y0≈180-245); even pages carry a "CHAPTER FIFTEEN" running header, odd
+# pages the caps title. Verified against anchors Ch.1=p.13, Ch.2=p.30,
+# Ch.3=p.43. Ch.16 opens on p.274, so Ch.15 = pp.254-273.
+chapter:
+  number: 15
+  start_page: 254
+  end_page: 273
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: pymupdf
+  lang: en
+
+clean:
+  header_patterns:
+    - "Harry Potter"
+    - "C H A P T E R F I F T E E N"
+    - "THE FORBIDDEN FOREST"
+    - "CHAPTER FIFTEEN"
+  remove_page_numbers: true
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['"', '"']
+
+segment:
+  lang: en
+  split_on: ['.', '!', '?']
+  abbreviations: ['Mr.', 'Mrs.', 'Dr.', 'St.', 'etc.', 'Prof.']

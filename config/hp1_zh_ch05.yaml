@@ -1,0 +1,52 @@
+book: hp1
+lang: zh
+
+pdf_path: data/raw/hp1_zh.pdf
+total_pages: 93
+has_text_layer: false
+
+title: "哈利·波特与魔法石"
+author: "J.K. 罗琳"
+translator: "苏农"
+publisher: "人民文学出版社"
+edition: "2018年第23次印刷"
+year: 2018
+isbn: "978-7-02-010329-4"
+
+# Chapter 5 page range — located by OCR run-length analysis of the
+# odd-page chapter running header (第5章 …) plus the big-font opener
+# signature (bbox height ≈105 vs running header ≈63-77; opener carries
+# the heading as page block #2). Verified contiguous with Ch.1-3 anchors
+# (pp.7-40). NOTE: this source PDF ends at p.93 = Ch.7 opener; Chapters
+# 7-17 are NOT present in this scan.
+# Ch.6 opens on p.74, so Ch.5 = pp.53-73.
+chapter:
+  number: 5
+  start_page: 53
+  end_page: 73
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: paddleocr
+  lang: ch
+  model: PP-OCRv5
+
+clean:
+  header_patterns:
+    - "哈利·波特与魔法石"
+    - "HARRY POTTER"
+    - "第5章对角巷"
+  remove_page_numbers: true
+  min_confidence: 0.5
+  footnote_markers: ["①", "②", "③", "④", "⑤"]
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['“', '”']
+
+segment:
+  lang: zh
+  split_on: ['。', '！', '？', '；']
+  preserve_ellipsis: true
