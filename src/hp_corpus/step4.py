@@ -588,22 +588,25 @@ def _assert_inputs_present(
     extraction_dir: Path,
     segmented_dir: Path,
     aligned_dir: Path,
+    zero_hits_ok: frozenset[tuple[int, str]] = frozenset(),
 ) -> None:
     """Verify that every requested chapter has the full input set.
 
-    For Ch.1–3 (the only scope this builder supports today), each chapter
-    must contribute:
+    Each chapter must contribute:
 
       * ``hp1_de_ch{NN}_contracted.tsv`` — non-empty body
       * ``hp1_de_ch{NN}_uncontracted.tsv`` — non-empty body
       * ``hp1_{de,en,zh}_ch{NN}.jsonl`` — exists, non-empty
       * ``hp1_de_{en,zh}_ch{NN}.jsonl`` — exists, non-empty
 
-    Header-only TSVs are rejected: for Ch.1–3 every form is known to be
-    populated, so a header-only file signals an upstream failure rather
-    than a legitimately-empty chapter. The future Ch.4–17 extension will
-    need an extraction-manifest mechanism to distinguish those cases
-    (out of scope here).
+    Header-only TSVs are rejected by default: for Ch.1–3 every form is
+    known to be populated, so a header-only file signals an upstream
+    failure rather than a legitimately-empty chapter. For the full-novel
+    scope, a (chapter, form) pair recorded as ``zero_hits_ok`` in the
+    extraction manifest may legitimately have a header-only TSV — pass
+    those pairs via ``zero_hits_ok`` (see
+    ``scripts/build_full_novel_annotation.py``). Zero-byte files always
+    fail regardless: an empty file is corruption, not a zero-hit form.
     """
     missing: list[str] = []
     bad: list[str] = []
@@ -615,7 +618,7 @@ def _assert_inputs_present(
                 missing.append(str(p))
             elif p.stat().st_size == 0:
                 bad.append(f"{p} (empty)")
-            elif not _has_tsv_body(p):
+            elif not _has_tsv_body(p) and (ch, kind) not in zero_hits_ok:
                 bad.append(f"{p} (header-only)")
         for lang in ("de", "en", "zh"):
             p = segmented_dir / f"hp1_{lang}_ch{ch:02d}.jsonl"
@@ -646,11 +649,17 @@ def build_candidates(
     segmented_dir: Path,
     aligned_dir: Path,
     chapters: Iterable[int],
+    zero_hits_ok: frozenset[tuple[int, str]] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Build the full candidate list for all chapters.
 
     Each candidate is a German PP occurrence with full DE/EN/ZH context
     plus alignment metadata. Pilot selection happens later.
+
+    ``zero_hits_ok`` names (chapter, form) pairs whose extraction TSV is
+    legitimately header-only because the full-novel extraction manifest
+    recorded ``status="zero_hits_ok"`` for them; all other header-only
+    TSVs are rejected as upstream failures.
 
     Raises :class:`MissingInputsError` if any requested chapter is missing
     a required input file, and :class:`UnresolvedSegmentIdError` if a
@@ -664,6 +673,7 @@ def build_candidates(
         extraction_dir=extraction_dir,
         segmented_dir=segmented_dir,
         aligned_dir=aligned_dir,
+        zero_hits_ok=zero_hits_ok,
     )
 
     de_segments = _load_segments(segmented_dir, "de", chapters)

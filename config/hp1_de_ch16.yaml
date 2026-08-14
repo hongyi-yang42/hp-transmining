@@ -1,0 +1,47 @@
+book: hp1
+lang: de
+
+# Carlsen 1998 first edition, Chapter 16. See hp1_de.yaml for source details.
+pdf_path: data/raw/1998 Harry Potter und der Stein der Weisen -- 1998.pdf
+total_pages: 337
+has_text_layer: true
+
+title: "Harry Potter und der Stein der Weisen"
+author: "J.K. Rowling"
+translator: "Klaus Fritz"
+publisher: "Carlsen Verlag"
+edition: "Erste Auflage 1998"
+year: 1998
+isbn: "978-3-551-31311-9"
+
+# Chapter 16 page range — located by scanning the text layer for the
+# vertically-offset chapter-title block (y0≈83/97 vs body y0≈42.7), verified
+# against known anchors Ch.1=p.7, Ch.2=p.26, Ch.3=p.40, Ch.4=p.56.
+# Ch.17 opens on p.315, so Ch.16 = pp.287-314.
+chapter:
+  number: 16
+  start_page: 287
+  end_page: 314
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: pymupdf
+  lang: german
+
+clean:
+  header_patterns:
+    - "Durch die Falltür"
+  remove_page_numbers: true
+  min_confidence: 0.5
+  merge_line_breaks: true
+  # concat_split: false  # available; off for 1998 DE (inline wordlist over-splits)
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['»', '«']
+
+segment:
+  lang: de
+  split_on: ['.', '!', '?']
+  abbreviations: ['Mr.', 'Mrs.', 'Dr.', 'St.', 'etc.', 'Prof.', 'Nr.', 'bzw.', 'z.B.', 'd.h.', 'u.a.']
