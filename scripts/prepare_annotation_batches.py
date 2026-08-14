@@ -25,8 +25,26 @@ For each eligible (include) row, compute::
     stable_key = int(h[:16], 16)
 
 Sort all eligible rows by ``(stable_key, chapter, de_form, datapoint_id)``.
-The first ``calibration_size`` rows form the shared calibration batch
-(assigned to every annotator). The remaining rows are partitioned:
+
+Calibration selection has two modes:
+
+  * ``--calibration-size N`` (default) — the first ``N`` rows of the
+    global stable order form the shared calibration batch. **This is NOT
+    stratified**: the composition w.r.t. ``de_form`` is whatever the
+    hash order yields (a balanced target like 10 contracted + 10
+    uncontracted is not guaranteed).
+  * ``--calibration-quota contracted=10,uncontracted=10`` — exact
+    per-``de_form`` quotas. Rows are taken in the same global stable
+    order subject to each stratum's remaining capacity, so the output is
+    deterministic AND the composition is exact. Fails closed when a
+    quota stratum is missing from the eligible pool's forms
+    (``CALIBRATION_QUOTA_INCOMPLETE``), when a stratum has fewer
+    eligible rows than its quota (``CALIBRATION_QUOTA_UNSATISFIABLE``),
+    or when both ``--calibration-size`` and ``--calibration-quota`` are
+    given (``CALIBRATION_QUOTA_CONFLICT``).
+
+Either way the calibration batch is assigned to every annotator, and the
+remaining rows are partitioned:
 
   * A's main batch = rows whose ``stable_key % n_annotators == A_index``.
   * To achieve overlap, A's batch also includes up to
@@ -40,12 +58,24 @@ Stdout carries only aggregate counts and the output directory path.
 Never ``datapoint_id`` values, annotator-editable values, source text,
 or hashes.
 
+Note that ``--overlap 0`` disables overlap rows only — every eligible
+row still has exactly one primary annotator (``stable_key % n``), so the
+annotator files remain a disjoint partition of the non-calibration rows.
+It is NOT full dual annotation, and ``--calibration-size 0 --overlap 0``
+yields completely disjoint files.
+
 Usage::
 
     uv run python scripts/prepare_annotation_batches.py \\
         --master-tsv data/derived/step4/master.tsv \\
         --out-dir   data/derived/step4/batches/run01 \\
         --annotators alice bob
+
+    uv run python scripts/prepare_annotation_batches.py \\
+        --master-tsv data/derived/step4/master.tsv \\
+        --out-dir   data/derived/step4/batches/run01 \\
+        --annotators alice bob \\
+        --calibration-quota contracted=10,uncontracted=10
 """
 
 from __future__ import annotations
@@ -55,6 +85,7 @@ import csv
 import hashlib
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +127,46 @@ def _stable_key(datapoint_id: str, seed: str) -> int:
     blob = f"{datapoint_id}|{seed}".encode()
     h = hashlib.sha256(blob).hexdigest()
     return int(h[:16], 16)
+
+
+def _parse_quota(spec: str) -> dict[str, int]:
+    """Parse a ``STRAT=COUNT[,STRAT=COUNT...]`` quota spec.
+
+    Stratum names are ``de_form`` values. A count of 0 explicitly
+    excludes a stratum from calibration; negative or malformed items are
+    refused.
+    """
+    quota: dict[str, int] = {}
+    if not spec.strip():
+        raise BatchError("BAD_CALIBRATION_QUOTA", "quota spec is empty")
+    for item in spec.split(","):
+        item = item.strip()
+        name, sep, count_s = item.partition("=")
+        name, count_s = name.strip(), count_s.strip()
+        if not sep or not name or not count_s:
+            raise BatchError(
+                "BAD_CALIBRATION_QUOTA",
+                f"malformed quota item {item!r} (expected STRAT=COUNT)",
+            )
+        try:
+            count = int(count_s)
+        except ValueError:
+            raise BatchError(
+                "BAD_CALIBRATION_QUOTA",
+                f"quota count for {name!r} is not an integer: {count_s!r}",
+            ) from None
+        if count < 0:
+            raise BatchError(
+                "BAD_CALIBRATION_QUOTA",
+                f"quota count for {name!r} is negative: {count}",
+            )
+        if name in quota:
+            raise BatchError(
+                "BAD_CALIBRATION_QUOTA",
+                f"stratum {name!r} listed more than once",
+            )
+        quota[name] = count
+    return quota
 
 
 # --------------------------------------------------------------------- routing
@@ -143,11 +214,35 @@ class _Eligible:
 # --------------------------------------------------------------------- assignment
 
 
+def _select_calibration(
+    eligible_sorted: list[_Eligible],
+    calibration_size: int,
+    calibration_quota: dict[str, int] | None,
+) -> list[_Eligible]:
+    """Pick the calibration entries from the globally stable-sorted list.
+
+    Quota mode walks the same global order and takes a row only while
+    its stratum still has capacity — deterministic, and the per-stratum
+    composition is exact.
+    """
+    if calibration_quota is None:
+        return eligible_sorted[:calibration_size]
+    remaining = dict(calibration_quota)
+    selected: list[_Eligible] = []
+    for e in eligible_sorted:
+        cap = remaining.get(e.de_form, 0)
+        if cap > 0:
+            selected.append(e)
+            remaining[e.de_form] = cap - 1
+    return selected
+
+
 def _assign(
     eligible: list[_Eligible],
     *,
     annotators: list[str],
     calibration_size: int,
+    calibration_quota: dict[str, int] | None,
     overlap_rate: float,
     seed: str,
 ) -> dict[str, Any]:
@@ -160,12 +255,15 @@ def _assign(
     n = len(annotators)
     annotator_index = {name: i for i, name in enumerate(annotators)}
 
-    # Stable-sort once. The slice that becomes calibration is the first
-    # ``calibration_size`` rows in this order; the rest is partitioned.
+    # Stable-sort once. Calibration is selected from the head of this
+    # order (sliced, or quota-constrained); the rest is partitioned.
     eligible.sort(key=lambda e: e.sort_key())
 
-    calibration_entries = eligible[:calibration_size]
-    remaining = eligible[calibration_size:]
+    calibration_entries = _select_calibration(
+        eligible, calibration_size, calibration_quota
+    )
+    cal_ids = {e.datapoint_id for e in calibration_entries}
+    remaining = [e for e in eligible if e.datapoint_id not in cal_ids]
 
     calibration_ids = [e.datapoint_id for e in calibration_entries]
 
@@ -345,20 +443,36 @@ def prepare_batches(
     annotators: list[str],
     seed: str,
     overlap: float,
-    calibration_size: int,
+    calibration_size: int | None,
     drop_excluded: bool,
     force_output: bool,
+    calibration_quota: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Pure driver — does all the work, returns the manifest dict (the
     same dict written to ``batch_manifest.json``).
 
+    Exactly one of ``calibration_size`` / ``calibration_quota`` must be
+    given (None for the other).
+
     Raises :class:`BatchError` on any user-facing failure. The CLI
     wrapper converts these to stderr messages + exit code 2.
     """
+    if calibration_size is not None and calibration_quota is not None:
+        raise BatchError(
+            "CALIBRATION_QUOTA_CONFLICT",
+            "--calibration-size and --calibration-quota are mutually "
+            "exclusive; quota mode fixes the calibration size itself",
+        )
+    effective_size = (
+        calibration_size
+        if calibration_size is not None
+        else sum(calibration_quota.values())
+    )
+
     _validate_args(
         annotators=annotators,
         overlap=overlap,
-        calibration_size=calibration_size,
+        calibration_size=effective_size,
         out_dir=out_dir,
         force_output=force_output,
     )
@@ -378,15 +492,36 @@ def prepare_batches(
         else:
             blocked_rows.append(r)
 
-    # Eligible check must happen before reading rows_by_id so we surface
-    # CALIBRATION_TOO_LARGE before any I/O.
+    # Eligible checks must happen before reading rows_by_id so we surface
+    # CALIBRATION_TOO_LARGE / quota errors before any I/O.
     eligible_count = len(include_rows)
-    if calibration_size > eligible_count:
+    if effective_size > eligible_count:
         raise BatchError(
             "CALIBRATION_TOO_LARGE",
-            f"--calibration-size ({calibration_size}) exceeds eligible count "
+            f"calibration size ({effective_size}) exceeds eligible count "
             f"({eligible_count}); refusing to silently shrink",
         )
+
+    if calibration_quota is not None:
+        observed: Counter[str] = Counter()
+        for r in include_rows:
+            observed[r.get("de_form", "")] += 1
+        missing = sorted(set(observed) - set(calibration_quota))
+        if missing:
+            raise BatchError(
+                "CALIBRATION_QUOTA_INCOMPLETE",
+                "quota does not cover every eligible form value(s): "
+                f"{', '.join(missing)}; list each with an explicit count "
+                "(0 excludes a form from calibration)",
+            )
+        for name in sorted(calibration_quota):
+            count = calibration_quota[name]
+            if count > observed.get(name, 0):
+                raise BatchError(
+                    "CALIBRATION_QUOTA_UNSATISFIABLE",
+                    f"quota for {name!r} is {count} but the eligible pool "
+                    f"has {observed.get(name, 0)}",
+                )
 
     # Build the eligible index.
     rows_by_id: dict[str, dict[str, str]] = {}
@@ -398,7 +533,8 @@ def prepare_batches(
     assignment = _assign(
         eligible,
         annotators=annotators,
-        calibration_size=calibration_size,
+        calibration_size=effective_size,
+        calibration_quota=calibration_quota,
         overlap_rate=overlap,
         seed=seed,
     )
@@ -450,10 +586,13 @@ def prepare_batches(
     # identifiers derived from public chapter + sentence-id + token
     # ranges. Still, to keep this file safe for stdout/CI, we keep it as
     # structured JSON rather than printing it.
+    calibration_composition = Counter(r.get("de_form", "") for r in calibration_rows)
     manifest = {
         "seed": seed,
         "annotators": list(annotators),
-        "calibration_size": calibration_size,
+        "calibration_mode": "form_quota" if calibration_quota is not None else "size",
+        "calibration_size": effective_size,
+        "calibration_composition": dict(sorted(calibration_composition.items())),
         "overlap_rate": overlap,
         "calibration_ids": calibration_ids,
         "per_annotator": per_annotator_manifest,
@@ -461,6 +600,8 @@ def prepare_batches(
         "blocked_count": len(blocked_rows),
         "total_eligible": eligible_count,
     }
+    if calibration_quota is not None:
+        manifest["calibration_quota"] = dict(sorted(calibration_quota.items()))
     with open(out_dir / "batch_manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
@@ -469,7 +610,9 @@ def prepare_batches(
     return {
         "__stdout__": {
             "annotators": len(annotators),
-            "calibration_size": calibration_size,
+            "calibration_mode": manifest["calibration_mode"],
+            "calibration_size": effective_size,
+            "calibration_composition": manifest["calibration_composition"],
             "overlap_rate": overlap,
             "eligible": eligible_count,
             "excluded": len(exclude_rows),
@@ -500,7 +643,29 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--seed", default=DEFAULT_SEED)
     ap.add_argument("--overlap", type=float, default=DEFAULT_OVERLAP)
-    ap.add_argument("--calibration-size", type=int, default=DEFAULT_CALIBRATION)
+    ap.add_argument(
+        "--calibration-size",
+        type=int,
+        default=None,
+        help=(
+            f"Calibration rows taken from the head of the stable order "
+            f"(default {DEFAULT_CALIBRATION} when neither this nor "
+            f"--calibration-quota is given). NOT stratified."
+        ),
+    )
+    ap.add_argument(
+        "--calibration-quota",
+        type=str,
+        default=None,
+        metavar="STRAT=COUNT[,STRAT=COUNT...]",
+        help=(
+            "Exact per-de_form calibration quotas, e.g. "
+            "'contracted=10,uncontracted=10'. Deterministic, exact "
+            "composition; fails closed if a listed quota cannot be met or "
+            "an eligible form is missing from the spec. Mutually exclusive "
+            "with --calibration-size."
+        ),
+    )
     ap.add_argument(
         "--drop-excluded",
         action="store_true",
@@ -519,15 +684,20 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     try:
+        quota = _parse_quota(args.calibration_quota) if args.calibration_quota else None
+        size = args.calibration_size
+        if size is None and quota is None:
+            size = DEFAULT_CALIBRATION
         result = prepare_batches(
             master_tsv=args.master_tsv,
             out_dir=args.out_dir,
             annotators=args.annotators,
             seed=args.seed,
             overlap=args.overlap,
-            calibration_size=args.calibration_size,
+            calibration_size=size,
             drop_excluded=args.drop_excluded,
             force_output=args.force_output,
+            calibration_quota=quota,
         )
     except BatchError as e:
         print(f"FAIL [{e.rule}]: {e.message}", file=sys.stderr)
@@ -536,7 +706,13 @@ def main(argv: list[str] | None = None) -> int:
     out = result["__stdout__"]
     # Privacy-disciplined stdout. NEVER print datapoint IDs or text.
     print(f"annotators: {out['annotators']}")
+    print(f"calibration_mode: {out['calibration_mode']}")
     print(f"calibration_size: {out['calibration_size']}")
+    comp = ", ".join(
+        f"{name}: {count}"
+        for name, count in out["calibration_composition"].items()
+    )
+    print(f"calibration_composition: {{{comp}}}")
     print(f"overlap_rate: {out['overlap_rate']}")
     print(f"eligible: {out['eligible']}")
     print(f"excluded: {out['excluded']}")

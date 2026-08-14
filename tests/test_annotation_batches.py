@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -713,3 +714,261 @@ def test_calibration_zero_disables(tmp_path: Path) -> None:
         assert manifest["per_annotator"][annotator]["calibration_ids"] == []
     cal_rows = _read_tsv(out / "calibration.tsv")
     assert cal_rows == []
+
+
+# ------------------------------------------------------------ calibration quota
+
+
+def test_calibration_quota_exact_composition(tmp_path: Path) -> None:
+    """--calibration-quota contracted=3,uncontracted=3 yields exactly
+    3 + 3, recorded in the manifest, shared by every annotator."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    rows = _build_master(master, n_include=16, n_exclude=0, n_uncertain=0, n_blank=0)
+    out = tmp_path / "out"
+    rc = mod.main(
+        [
+            "--master-tsv", str(master),
+            "--out-dir", str(out),
+            "--annotators", "alice", "bob",
+            "--calibration-quota", "contracted=3,uncontracted=3",
+            "--overlap", "0.0",
+        ]
+    )
+    assert rc == 0
+
+    manifest = json.loads((out / "batch_manifest.json").read_text())
+    assert manifest["calibration_mode"] == "form_quota"
+    assert manifest["calibration_quota"] == {"contracted": 3, "uncontracted": 3}
+    assert manifest["calibration_composition"] == {
+        "contracted": 3,
+        "uncontracted": 3,
+    }
+    assert len(manifest["calibration_ids"]) == 6
+
+    cal_rows = _read_tsv(out / "calibration.tsv")
+    assert len(cal_rows) == 6
+    by_id = {r["datapoint_id"]: r for r in rows}
+    comp = Counter(by_id[r["datapoint_id"]]["de_form"] for r in cal_rows)
+    assert comp == Counter({"contracted": 3, "uncontracted": 3})
+
+    # Shared calibration in every annotator file.
+    for annotator in ("alice", "bob"):
+        ids = [r["datapoint_id"] for r in _read_tsv(out / f"{annotator}.tsv")]
+        for cid in manifest["calibration_ids"]:
+            assert cid in ids
+
+    # Coverage: all 16 eligible rows still appear somewhere.
+    seen: set[str] = set()
+    for annotator in ("alice", "bob"):
+        seen.update(
+            r["datapoint_id"] for r in _read_tsv(out / f"{annotator}.tsv")
+        )
+    eligible_ids = {
+        r["datapoint_id"] for r in rows if r["de_candidate_decision"] == "include"
+    }
+    assert eligible_ids.issubset(seen)
+
+
+def test_calibration_quota_determinism(tmp_path: Path) -> None:
+    """Quota mode is byte-identical across runs with the same inputs."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    _build_master(master, n_include=24)
+    out1, out2 = tmp_path / "run1", tmp_path / "run2"
+    argv = [
+        "--master-tsv", str(master),
+        "--annotators", "alice", "bob",
+        "--calibration-quota", "contracted=5,uncontracted=5",
+    ]
+    assert mod.main(argv + ["--out-dir", str(out1)]) == 0
+    assert mod.main(argv + ["--out-dir", str(out2)]) == 0
+    assert _dir_sha256_snapshot(out1) == _dir_sha256_snapshot(out2)
+
+
+def test_calibration_quota_stable_order_subsequence(tmp_path: Path) -> None:
+    """Quota-selected calibration IDs are a subsequence of the global
+    stable-sorted eligible order (selection preserves order, only caps
+    per stratum)."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    rows = _build_master(master, n_include=24, n_exclude=0, n_uncertain=0, n_blank=0)
+    seed = "quota-order-seed"
+    out = tmp_path / "out"
+    rc = mod.main(
+        [
+            "--master-tsv", str(master),
+            "--out-dir", str(out),
+            "--annotators", "alice", "bob",
+            "--calibration-quota", "contracted=4,uncontracted=4",
+            "--seed", seed,
+        ]
+    )
+    assert rc == 0
+    manifest = json.loads((out / "batch_manifest.json").read_text())
+
+    def _key(r: dict[str, str]) -> tuple[Any, ...]:
+        h = hashlib.sha256(
+            f"{r['datapoint_id']}|{seed}".encode()
+        ).hexdigest()
+        return (int(h[:16], 16), int(r["chapter"]), r["de_form"], r["datapoint_id"])
+
+    include_rows = [r for r in rows if r["de_candidate_decision"] == "include"]
+    global_order = [r["datapoint_id"] for r in sorted(include_rows, key=_key)]
+    pos = {dp: i for i, dp in enumerate(global_order)}
+    cal = manifest["calibration_ids"]
+    assert [pos[dp] for dp in cal] == sorted(pos[dp] for dp in cal)
+
+
+def test_calibration_quota_refuses_conflict_with_size(tmp_path: Path) -> None:
+    """Both --calibration-size and --calibration-quota → exit 2."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    _build_master(master, n_include=20)
+    rc = mod.main(
+        [
+            "--master-tsv", str(master),
+            "--out-dir", str(tmp_path / "out"),
+            "--annotators", "alice", "bob",
+            "--calibration-size", "4",
+            "--calibration-quota", "contracted=2,uncontracted=2",
+        ]
+    )
+    assert rc == 2
+
+
+def test_calibration_quota_refuses_incomplete(tmp_path: Path) -> None:
+    """A quota that does not list every eligible form → exit 2."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    _build_master(master, n_include=20)  # both forms present
+    rc = mod.main(
+        [
+            "--master-tsv", str(master),
+            "--out-dir", str(tmp_path / "out"),
+            "--annotators", "alice", "bob",
+            "--calibration-quota", "contracted=10",  # uncontracted missing
+        ]
+    )
+    assert rc == 2
+
+
+def test_calibration_quota_refuses_unsatisfiable(tmp_path: Path) -> None:
+    """Quota exceeding a stratum's eligible count → exit 2."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    # forms alternate → 5 contracted / 5 uncontracted among 10 include rows.
+    _build_master(master, n_include=10)
+    rc = mod.main(
+        [
+            "--master-tsv", str(master),
+            "--out-dir", str(tmp_path / "out"),
+            "--annotators", "alice", "bob",
+            "--calibration-quota", "contracted=6,uncontracted=4",
+        ]
+    )
+    assert rc == 2
+
+
+def test_calibration_quota_bad_spec(tmp_path: Path) -> None:
+    """Malformed quota specs → exit 2."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    _build_master(master, n_include=10)
+    for bad in ["contracted=x,uncontracted=2", "contracted", "a=1,a=2", "a=-1,b=2"]:
+        rc = mod.main(
+            [
+                "--master-tsv", str(master),
+                "--out-dir", str(tmp_path / "out"),
+                "--annotators", "alice", "bob",
+                "--calibration-quota", bad,
+            ]
+        )
+        assert rc == 2, f"spec {bad!r} must be refused"
+
+
+def test_calibration_quota_zero_excludes_stratum(tmp_path: Path) -> None:
+    """A 0 quota explicitly excludes a form from calibration; those rows
+    stay in the main batches (coverage unaffected)."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    rows = _build_master(master, n_include=12, n_exclude=0, n_uncertain=0, n_blank=0)
+    out = tmp_path / "out"
+    rc = mod.main(
+        [
+            "--master-tsv", str(master),
+            "--out-dir", str(out),
+            "--annotators", "alice", "bob",
+            "--calibration-quota", "contracted=4,uncontracted=0",
+            "--overlap", "0.0",
+        ]
+    )
+    assert rc == 0
+    manifest = json.loads((out / "batch_manifest.json").read_text())
+    assert manifest["calibration_composition"] == {"contracted": 4}
+
+    seen: set[str] = set()
+    for annotator in ("alice", "bob"):
+        seen.update(
+            r["datapoint_id"] for r in _read_tsv(out / f"{annotator}.tsv")
+        )
+    eligible_ids = {
+        r["datapoint_id"] for r in rows if r["de_candidate_decision"] == "include"
+    }
+    assert eligible_ids.issubset(seen)
+
+
+def test_calibration_quota_stdout_privacy(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Quota-mode stdout carries aggregate counts only — no fixture text,
+    datapoint IDs, or column names."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    _build_master(master, n_include=10)
+    out = tmp_path / "out"
+    rc = mod.main(
+        [
+            "--master-tsv", str(master),
+            "--out-dir", str(out),
+            "--annotators", "alice", "bob",
+            "--calibration-quota", "contracted=2,uncontracted=2",
+        ]
+    )
+    assert rc == 0
+    captured = capsys.readouterr().out
+
+    forbidden = [
+        _SYNTH_DE_TEXT, _SYNTH_EN_TEXT, _SYNTH_ZH_TEXT, _SYNTH_LEMMA,
+        "datapoint_id", "de_form", "source_row_sha256",
+    ]
+    for r in _read_tsv(master)[:5]:
+        forbidden.append(r["datapoint_id"])
+    for needle in forbidden:
+        assert needle not in captured, f"stdout leaked {needle!r}"
+
+    # Composition is printed as aggregate counts.
+    assert "calibration_composition:" in captured
+    assert "calibration_mode: form_quota" in captured
+
+
+def test_calibration_composition_recorded_in_size_mode(tmp_path: Path) -> None:
+    """Size mode also records the actual composition — the coordinator
+    can verify the draw without touching IDs."""
+    mod = _load_script()
+    master = tmp_path / "master.tsv"
+    _build_master(master, n_include=10)
+    out = tmp_path / "out"
+    rc = mod.main(
+        [
+            "--master-tsv", str(master),
+            "--out-dir", str(out),
+            "--annotators", "alice", "bob",
+            "--calibration-size", "4",
+        ]
+    )
+    assert rc == 0
+    manifest = json.loads((out / "batch_manifest.json").read_text())
+    assert manifest["calibration_mode"] == "size"
+    assert sum(manifest["calibration_composition"].values()) == 4
+    assert "calibration_quota" not in manifest
