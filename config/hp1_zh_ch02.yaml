@@ -1,43 +1,57 @@
 book: hp1
 lang: zh
 
-pdf_path: data/raw/hp1_zh.pdf
-total_pages: 93
-has_text_layer: false
+# Source PDF — People's Literature Publishing House Su Nong translation,
+# obtained as a calibre 3.39.1 ebook-to-PDF conversion (PDF 1.4, created
+# 2019-02-16, 232 pages, born-digital text layer on essentially every page).
+# calibre PDF created 2019-02-16; print-edition provenance unverified.
+# This is NOT the 2018 23rd-printing scan (data/raw/hp1_zh.pdf): same Su
+# Nong translation, completely different typeset and pagination. Source of
+# record for ZH Ch.1-17 per coordinator approval of Source Option A
+# (2026-08-15, see data/derived/zh_source_audit/SOURCE_DECISION_MEMO.md);
+# it replaces the old scan whose Ch.5/6 PaddleOCR line loss is documented
+# in the audit. Old-source outputs archived in
+# data/derived/zh_source_audit/legacy_archive/.
+pdf_path: data/raw/中文_哈利波特与魔法石 Z.pdf
+total_pages: 232
+has_text_layer: true
 
 title: "哈利·波特与魔法石"
 author: "J.K. 罗琳"
 translator: "苏农"
 publisher: "人民文学出版社"
-edition: "2018年第23次印刷"
-year: 2018
-isbn: "978-7-02-010329-4"
+edition: "calibre 3.39.1 电纸书转换本（非印刷版扫描；印刷版本来源未验证）"
+year: 2019
 
-# Chapter 2 page range — "悄悄消失的玻璃".
-# Verified by OCR'ing candidate pages: Ch.2 opener ("第2章 悄悄消失的玻璃")
-# is on p.19; Ch.3 ("第3章 猫头鹰传书") opens on p.29. So Ch.2 = pp.19-28.
+# Chapter page range — located by scanning the text layer for the chapter
+# heading line (13.8pt; 第N章 with full-width digits): each heading occurs
+# exactly once and this source carries no running headers. Cross-checked
+# against the embedded TOC (Ch.2=p.17). Ch.3 opens on p.26, so Ch.2 = pp.17-25.
+# Front matter pp.1-4 excluded.
 chapter:
   number: 2
-  start_page: 19
-  end_page: 28
+  start_page: 17
+  end_page: 25
 
 scan:
   dpi: 300
 
 ocr:
-  engine: paddleocr
-  lang: ch
-  model: PP-OCRv5
+  engine: pymupdf  # born-digital text layer; no OCR pass needed
+  lang: zh
 
 clean:
   header_patterns:
-    - "哈利·波特与魔法石"
-    - "HARRY POTTER"
-    - "第2章 悄悄消失的玻璃"
-    - "第2章悄悄消失的玻璃"
+    - "第２章　悄悄消失的玻璃"
   remove_page_numbers: true
-  min_confidence: 0.5
-  footnote_markers: ["①", "②", "③", "④", "⑤"]
+  # Translator notes in this ebook are typeset in small print: a superscript
+  # digit marker (6.6pt) inline in the body, and note entries (6.6pt digit +
+  # 7.8pt body text) grouped at the chapter end. Body text is 10.8pt, chapter
+  # headings 13.8pt. Embedded documents (letters, lists) share the 7.8pt
+  # small print and stay in the body because they carry no marker digit.
+  footnote_spans:
+    marker_max_size: 7.0
+    note_max_size: 9.0
   merge_line_breaks: true
   paragraph_detection:
     indent_threshold: 2

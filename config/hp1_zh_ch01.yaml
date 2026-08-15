@@ -26,12 +26,12 @@ year: 2019
 # Chapter page range — located by scanning the text layer for the chapter
 # heading line (13.8pt; 第N章 with full-width digits): each heading occurs
 # exactly once and this source carries no running headers. Cross-checked
-# against the embedded TOC (Ch.5=p.47). Ch.6 opens on p.66, so Ch.5 = pp.47-65.
+# against the embedded TOC (Ch.1=p.5). Ch.2 opens on p.17, so Ch.1 = pp.5-16.
 # Front matter pp.1-4 excluded.
 chapter:
-  number: 5
-  start_page: 47
-  end_page: 65
+  number: 1
+  start_page: 5
+  end_page: 16
 
 scan:
   dpi: 300
@@ -42,7 +42,7 @@ ocr:
 
 clean:
   header_patterns:
-    - "第５章　对角巷"
+    - "第１章　大难不死的男孩"
   remove_page_numbers: true
   # Translator notes in this ebook are typeset in small print: a superscript
   # digit marker (6.6pt) inline in the body, and note entries (6.6pt digit +
