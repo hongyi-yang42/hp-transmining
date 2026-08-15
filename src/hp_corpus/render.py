@@ -11,7 +11,7 @@ import fitz  # PyMuPDF
 import yaml
 from pydantic import BaseModel
 
-from .schema import OCRBlock
+from .schema import OCRBlock, OCRLine, OCRSpan
 
 
 class ValidationError(Exception):
@@ -185,6 +185,11 @@ def extract_text_layer_blocks(
 
     Used directly by ocr.py when engine == 'pymupdf'. Page numbers in the
     returned records are 1-indexed.
+
+    Span-level metadata (font size, flags) is preserved on ``OCRBlock.lines``
+    so downstream cleaning can separate footnote markers (superscript digits)
+    and note bodies (small-print spans) from body text. PaddleOCR blocks
+    carry no such metadata; their ``lines`` stay empty.
     """
     blocks: list[OCRBlock] = []
     with fitz.open(pdf_path) as doc:
@@ -201,11 +206,25 @@ def extract_text_layer_blocks(
                 if not lines:
                     continue
                 text_parts: list[str] = []
+                line_meta: list[OCRLine] = []
                 for line in lines:
                     spans = line.get("spans", [])
                     line_text = "".join(s.get("text", "") for s in spans)
                     if line_text:
                         text_parts.append(line_text)
+                        line_meta.append(
+                            OCRLine(
+                                spans=[
+                                    OCRSpan(
+                                        text=s.get("text", ""),
+                                        size=float(s.get("size", 0.0)),
+                                        flags=int(s.get("flags", 0)),
+                                    )
+                                    for s in spans
+                                    if s.get("text", "")
+                                ]
+                            )
+                        )
                 if not text_parts:
                     continue
                 text = "\n".join(text_parts)
@@ -217,6 +236,7 @@ def extract_text_layer_blocks(
                         bbox=bbox,
                         confidence=1.0,
                         engine="pymupdf",
+                        lines=line_meta,
                     )
                 )
                 block_idx += 1

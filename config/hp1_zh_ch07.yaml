@@ -1,0 +1,59 @@
+book: hp1
+lang: zh
+
+# Source PDF — People's Literature Publishing House Su Nong translation,
+# obtained as a calibre 3.39.1 ebook-to-PDF conversion (PDF 1.4, created
+# 2019-02-16, 232 pages, born-digital text layer on essentially every page).
+# This is NOT the 2018 23rd-printing scan (data/raw/hp1_zh.pdf): same Su
+# Nong translation, completely different typeset and pagination.
+pdf_path: data/raw/中文_哈利波特与魔法石 Z.pdf
+total_pages: 232
+has_text_layer: true
+
+title: "哈利·波特与魔法石"
+author: "J.K. 罗琳"
+translator: "苏农"
+publisher: "人民文学出版社"
+edition: "calibre 3.39.1 电纸书转换本（非印刷版扫描）"
+year: 2019
+
+# Chapter page range — located by scanning the text layer for the chapter
+# heading line (13.8pt; 第N章 with full-width digits for Ch.7-9, ASCII for
+# Ch.10-17): each heading occurs exactly once and this source carries no
+# running headers. Cross-checked against the embedded TOC (Ch.7=p.85 …
+# Ch.17=p.216). Front matter pp.1-4 and the trailing footnote/colophon
+# page p.232 are excluded.
+# Ch.8 opens on p.98, so Ch.7 = pp.85-97.
+chapter:
+  number: 7
+  start_page: 85
+  end_page: 97
+
+scan:
+  dpi: 300
+
+ocr:
+  engine: pymupdf  # born-digital text layer; no OCR pass needed
+  lang: zh
+
+clean:
+  header_patterns:
+    - "第７章　分院帽"
+  remove_page_numbers: true
+  # Translator notes in this ebook are typeset in small print: a superscript
+  # digit marker (6.6pt) inline in the body, and note entries (6.6pt digit +
+  # 7.8pt body text) grouped at the chapter end. Body text is 10.8pt, chapter
+  # headings 13.8pt. Embedded documents (letters, lists) share the 7.8pt
+  # small print and stay in the body because they carry no marker digit.
+  footnote_spans:
+    marker_max_size: 7.0
+    note_max_size: 9.0
+  merge_line_breaks: true
+  paragraph_detection:
+    indent_threshold: 2
+    dialogue_markers: ['“', '”']
+
+segment:
+  lang: zh
+  split_on: ['。', '！', '？', '；']
+  preserve_ellipsis: true

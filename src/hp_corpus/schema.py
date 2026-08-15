@@ -7,6 +7,26 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class OCRSpan(BaseModel):
+    """One styled span within a text-layer line (pymupdf engine only).
+
+    PaddleOCR emits plain text lines, so its blocks carry no span metadata
+    (``OCRBlock.lines`` stays empty). The pymupdf engine populates it so the
+    clean stage can separate footnote markers (small superscript digits) and
+    note bodies (small-print spans) from body text by font size.
+    """
+
+    text: str
+    size: float = Field(default=0.0, description="Font size in pt")
+    flags: int = Field(default=0, description="PyMuPDF span flags bitfield")
+
+
+class OCRLine(BaseModel):
+    """One rendered line inside a text-layer block."""
+
+    spans: list[OCRSpan] = Field(default_factory=list)
+
+
 class OCRBlock(BaseModel):
     """One text block from OCR or text-layer extraction."""
 
@@ -16,6 +36,12 @@ class OCRBlock(BaseModel):
     bbox: list[float] = Field(description="[x0, y0, x1, y1] in PDF coordinate units")
     confidence: float = Field(ge=0.0, le=1.0, default=1.0)
     engine: Literal["paddleocr", "pymupdf"]
+    lines: list[OCRLine] = Field(
+        default_factory=list,
+        description="Line/span structure of the text layer (pymupdf only). "
+        "Invariant when populated: text == '\\n'.join(''.join(span.text for "
+        "span in line.spans) for line in lines).",
+    )
 
 
 class CleanSentence(BaseModel):
