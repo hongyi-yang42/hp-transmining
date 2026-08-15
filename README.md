@@ -4,7 +4,7 @@
 
 Translation mining extracts grammatical categories (here: definiteness) from parallel translations rather than from manual annotation. The three sources — Scholastic 1998 (English), a born-digital ebook conversion of the People's Literature Publishing House Chinese translation (Su Nong; print-edition provenance unverified), and Carlsen 1998 first edition (German, Klaus Fritz) — are used to build a **machine-aligned** DE/EN/ZH corpus on which to run the paper's PP extractor.
 
-**Scope:** the full novel (Ch.1–17). The pipeline produces a machine-built German PP candidate pool joined to EN/ZH aligned contexts (`dataset_scope = full_novel_machine_candidate_pool`, human-editable columns blank). The paper's final 96 trilingual contexts are hand-selected from this pool after human German review and EN/ZH annotation (see `docs/STEP4_ANNOTATION.md`) — the machine pool is not an analysis-ready corpus.
+**Scope:** the full novel (Ch.1–17). The pipeline produces a machine-built German PP candidate pool joined to EN/ZH aligned contexts (`dataset_scope = full_novel_machine_candidate_pool`, human-editable columns blank). The paper's final 96 data points are an **external aggregate benchmark** — the paper publishes no per-item list, and our analysis sample is defined by a separate selection procedure on this pool (see `docs/ANALYSIS_SAMPLE_DESIGN.md`), not by recovering those 96. The machine pool is not an analysis-ready corpus.
 
 ## What this project does
 
