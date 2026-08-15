@@ -246,7 +246,7 @@ def test_master_source_hashed_editable_blank(tmp_path: Path) -> None:
     rows = _read_master(tmp_path / "out" / "full_novel_annotation_master.tsv")
     from hp_corpus.step4 import BUILDER_DEFAULT_EDITABLE, EDITABLE_COLUMNS
     for r in rows:
-        assert r["dataset_scope"] == "full_novel_annotation_master"
+        assert r["dataset_scope"] == "full_novel_machine_candidate_pool"
         assert r["de_candidate_decision"] == ""
         assert r["en_form"] == ""
         assert r["zh_form"] == ""
