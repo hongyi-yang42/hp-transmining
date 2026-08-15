@@ -89,6 +89,13 @@ because neither `um` nor `vor` appears in the paper's uncontracted
 
 ### C_late lemma-match policy
 
+> **Forward design:** `docs/ANALYSIS_SAMPLE_DESIGN.md` (§3, S4)
+> specifies a paper-literal **prep+noun** C_late match — the paper's
+> §2.2.1 "same preposition and noun" — to replace the noun-only rule
+> below via a future code change. Until it lands, the noun-only
+> behavior described below is the only implemented rule, and any
+> ledger built with it is provisional.
+
 The C_late expansion is keyed on the **head-noun lemma alone**, not on
 `canonical_preposition + lemma`. The paper's §3.2 describes the
 expansion in terms of occurrences involving the same noun; canonical
@@ -162,12 +169,17 @@ with the datapoint IDs of the C_late rows it enabled — for audit
 purposes, so a reviewer can see which Ch.4–17 PPs entered the sample
 because of which Ch.1–17 uncontracted counterparts.
 
-## Real-data blockers
+## Data readiness and fail-closed behavior
 
-Ch.4–17 German parsed CoNLL-U files are not produced by the pipeline
-until the corresponding chapter configs and Stanza parses exist. The
-extraction CLI will fail closed (`MISSING_PARSED_INPUT`) on those
-chapters by default; the sampling CLI produces an empty ledger until
-those chapters are available. This is by design — the infrastructure
-ships before the full-novel data so the moment parses exist, the
-sampling ledger can be regenerated without code changes.
+The pipeline is built to ship before the data: a missing parsed input
+fails closed (`MISSING_PARSED_INPUT`) by default, and the sampling CLI
+produces an empty ledger until the chapters it needs exist — once the
+parses land, the ledger regenerates without code changes. At present
+the Ch.1–17 machine corpus exists end-to-end, and every
+inventory-eligible ledger row sits at `blocked_german_review`:
+selection is gated on the German review, which has not been run.
+
+Known provenance limitation: `sent_id` is not unique across CoNLL-U
+blocks (one Segment can split into several Stanza sentence blocks), so
+a `parse_block_id`-style migration is a hard gate before any annotator
+batch (`docs/ANALYSIS_SAMPLE_DESIGN.md` §7.2).
