@@ -78,8 +78,8 @@ def _exit(rule: str, message: str) -> int:
     return EXIT_INPUT_ERROR
 
 
-def _make_datapoint_id(chapter: int, sentence_id: str, token_start: str, token_end: str) -> str:
-    return f"dp_ch{chapter:02d}_{sentence_id}_t{token_start}-{token_end}"
+def _make_datapoint_id(chapter: int, parse_block_id: str, token_start: str, token_end: str) -> str:
+    return f"dp_ch{chapter:02d}_{parse_block_id}_t{token_start}-{token_end}"
 
 
 def _load_extraction_tsv(path: Path) -> list[dict[str, str]]:
@@ -120,12 +120,17 @@ def build_occurrences(
             except FileNotFoundError:
                 continue
             for r in rows:
-                sentence_id = r.get("sentence_id", "")
+                block_id = r.get("parse_block_id", "")
+                if not block_id or not r.get("source_segment_id", ""):
+                    raise ValueError(
+                        f"{path}: extraction row without parse_block_id / "
+                        "source_segment_id provenance columns"
+                    )
                 prep_surface = r.get("prep", "")
                 machine_lemma = r.get("noun", "")
                 token_start = r.get("pp_token_start", "")
                 token_end = r.get("pp_token_end", "")
-                dp = _make_datapoint_id(ch, sentence_id, token_start, token_end)
+                dp = _make_datapoint_id(ch, block_id, token_start, token_end)
                 master_row = master_index.get(dp, {})
                 reviewed_lemma = master_row.get("de_reviewed_lemma", "")
                 manual_override = master_row.get("manual_lemma_override", "")
@@ -136,7 +141,7 @@ def build_occurrences(
                 source_hash = master_row.get("source_row_sha256", "")
                 if not source_hash:
                     source_hash = _extraction_hash(
-                        dp, sentence_id, prep_surface, machine_lemma, token_start, token_end
+                        dp, block_id, prep_surface, machine_lemma, token_start, token_end
                     )
                 canonical = canonical_preposition(prep_surface)
                 out.append(

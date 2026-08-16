@@ -39,6 +39,13 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from hp_corpus.provenance import (
+    MissingProvenanceError,
+    scan_blocks,
+    validate_blocks,
+)
 
 # --------------------------------------------------------------------- types
 
@@ -57,11 +64,24 @@ class Token:
 
 @dataclass(frozen=True)
 class Sentence:
-    """A CoNLL-U sentence keyed by its UD sent_id."""
+    """A parsed CoNLL-U block with two-level provenance.
+
+    ``sent_id`` is the block-level id (after the provenance migration
+    the CoNLL-U ``# sent_id`` IS the ``parse_block_id``);
+    ``source_segment_id`` is the alignment-level segment the block was
+    parsed from. Both are populated by :func:`parse_conllu`, which fails
+    closed when either is missing or inconsistent — so every Sentence
+    obtained from a file carries complete provenance. ``sent_id`` and
+    ``parse_block_id`` hold the same value; the explicit field exists so
+    consumers can ask for block identity without depending on the
+    sent_id column's meaning.
+    """
 
     sent_id: str
     text: str
     tokens: tuple[Token, ...]
+    parse_block_id: str | None = None
+    source_segment_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -215,14 +235,28 @@ def _is_range_id(token_id: str | None) -> bool:
 
 
 def parse_conllu(path) -> dict[str, Sentence]:
-    """Parse a CoNLL-U file into a {sent_id → Sentence} map.
+    """Parse a **migrated** CoNLL-U file into a {parse_block_id → Sentence} map.
 
     Implements just enough of the format for our needs: comment lines
     starting with ``#`` capture ``sent_id`` and ``text``; token lines
     follow the 10-column TSV. MWT range lines are skipped. With pyconll
     available, callers may prefer it; this parser keeps the module
     dependency-free for unit tests.
+
+    Provenance is fail-closed: the file is first validated with the
+    centralized :func:`hp_corpus.provenance.validate_blocks`, so every
+    returned Sentence carries a unique ``parse_block_id`` and its
+    ``source_segment_id``. Unmigrated files, missing source comments,
+    duplicate block ids, prefix mismatches, broken ordinal order — and
+    physical blocks whose token content carries no ``# sent_id`` — all
+    raise before any sentence is returned.
     """
+    text = Path(path).read_text(encoding="utf-8")
+    lines = text.splitlines()
+    blocks = scan_blocks(lines)
+    validate_blocks(blocks)
+    source_by_block = {b.sent_id: b.source_segment_id for b in blocks}
+
     out: dict[str, Sentence] = {}
     current_sent_id: str | None = None
     current_text: str = ""
@@ -235,48 +269,86 @@ def parse_conllu(path) -> dict[str, Sentence]:
                 sent_id=current_sent_id,
                 text=current_text,
                 tokens=tuple(current_tokens),
+                parse_block_id=current_sent_id,
+                source_segment_id=source_by_block[current_sent_id],
             )
         current_sent_id = None
         current_text = ""
         current_tokens = []
 
-    with open(path, encoding="utf-8") as f:
-        for raw in f:
-            line = raw.rstrip("\n")
-            if not line:
-                _flush()
-                continue
-            if line.startswith("#"):
-                m_sent = re.match(r"^# sent_id\s*=\s*(\S+)", line)
-                if m_sent:
-                    current_sent_id = m_sent.group(1)
-                m_text = re.match(r"^# text\s*=\s*(.*)$", line)
-                if m_text:
-                    current_text = m_text.group(1)
-                continue
-            cols = line.split("\t")
-            if len(cols) < 8:
-                continue
-            tid_str = cols[0]
-            if _is_range_id(tid_str):
-                continue
-            try:
-                tid = int(tid_str)
-                head = int(cols[6]) if cols[6] else 0
-            except ValueError:
-                continue
-            current_tokens.append(
-                Token(
-                    token_id=tid,
-                    form=cols[1],
-                    lemma=cols[2],
-                    upos=cols[3],
-                    head=head,
-                    deprel=cols[7],
-                )
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if not line:
+            _flush()
+            continue
+        if line.startswith("#"):
+            m_sent = re.match(r"^# sent_id\s*=\s*(\S+)", line)
+            if m_sent:
+                current_sent_id = m_sent.group(1)
+            m_text = re.match(r"^# text\s*=\s*(.*)$", line)
+            if m_text:
+                current_text = m_text.group(1)
+            continue
+        cols = line.split("\t")
+        if len(cols) < 8:
+            continue
+        tid_str = cols[0]
+        if _is_range_id(tid_str):
+            continue
+        try:
+            tid = int(tid_str)
+            head = int(cols[6]) if cols[6] else 0
+        except ValueError:
+            continue
+        current_tokens.append(
+            Token(
+                token_id=tid,
+                form=cols[1],
+                lemma=cols[2],
+                upos=cols[3],
+                head=head,
+                deprel=cols[7],
             )
-        _flush()
+        )
+    _flush()
+
+    if set(out) != set(source_by_block):
+        # Defensive invariant: every validated block id was parsed and
+        # flushed exactly once. The remaining trigger is a `# sent_id`
+        # overwritten before its block flushes (two headers with no
+        # blank line between). Token content with no `# sent_id` at all
+        # is already rejected upstream by validate_blocks.
+        raise MissingProvenanceError(
+            f"block-count mismatch after parse: {len(blocks)} validated, "
+            f"{len(out)} parsed"
+        )
     return out
+
+
+def index_blocks_by_segment(
+    sentences: dict[str, Sentence],
+) -> dict[str, list[Sentence]]:
+    """Index parsed blocks by their **source segment** (alignment level).
+
+    Returns ``{source_segment_id → [Sentence, …]}`` where each list
+    holds the segment's parse blocks in document order (the order the
+    parser emitted them, i.e. ascending ``#bNNN`` ordinal). An aligned
+    source segment that the parser split into several blocks therefore
+    yields all of its blocks, so the PP mapper sees candidates from
+    every one of them.
+
+    Fails closed with :class:`MissingProvenanceError` if any Sentence
+    lacks a ``source_segment_id`` (only possible for directly
+    constructed objects — :func:`parse_conllu` output is validated).
+    """
+    index: dict[str, list[Sentence]] = {}
+    for s in sentences.values():
+        if not s.source_segment_id:
+            raise MissingProvenanceError(
+                f"block {s.sent_id!r} has no source_segment_id"
+            )
+        index.setdefault(s.source_segment_id, []).append(s)
+    return index
 
 
 # --------------------------------------------------------------------- extraction
@@ -652,6 +724,7 @@ __all__ = [
     "Sentence",
     "Token",
     "extract_pps",
+    "index_blocks_by_segment",
     "parse_conllu",
     "propose_for_sides",
     "score_candidate",

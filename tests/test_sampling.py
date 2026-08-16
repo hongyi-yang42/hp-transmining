@@ -502,7 +502,8 @@ def test_is_inventory_eligible_helper() -> None:
 
 def _write_extraction_tsv(path: Path, rows: list[dict[str, str]]) -> Path:
     fields = [
-        "sentence_id",
+        "parse_block_id",
+        "source_segment_id",
         "prep",
         "det",
         "noun",
@@ -557,7 +558,8 @@ def test_cli_writes_ledger_and_summary(tmp_path: Path) -> None:
         extraction / "hp1_de_ch01_uncontracted.tsv",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0001_s001",
+                "parse_block_id": "hp1_de_ch01_p0001_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0001_s001",
                 "prep": "in",
                 "det": "dem",
                 "noun": "alpha",
@@ -575,7 +577,8 @@ def test_cli_writes_ledger_and_summary(tmp_path: Path) -> None:
         extraction / "hp1_de_ch01_contracted.tsv",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0002_s001",
+                "parse_block_id": "hp1_de_ch01_p0002_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0002_s001",
                 "prep": "im",
                 "noun": "alpha",
                 "prep_token_id": "1",
@@ -590,8 +593,8 @@ def test_cli_writes_ledger_and_summary(tmp_path: Path) -> None:
     master = _write_master_tsv(
         tmp_path / "master.tsv",
         {
-            "dp_ch01_hp1_de_ch01_p0001_s001_t1-3": "include",
-            "dp_ch01_hp1_de_ch01_p0002_s001_t1-2": "include",
+            "dp_ch01_hp1_de_ch01_p0001_s001#b001_t1-3": "include",
+            "dp_ch01_hp1_de_ch01_p0002_s001#b001_t1-2": "include",
         },
     )
     out_dir = tmp_path / "out"
@@ -611,8 +614,8 @@ def test_cli_writes_ledger_and_summary(tmp_path: Path) -> None:
     assert len(rows) == 2
     by_id = {r["datapoint_id"]: r for r in rows}
     # The uncontracted U row + the contracted C_early row both select.
-    u_id = "dp_ch01_hp1_de_ch01_p0001_s001_t1-3"
-    c_id = "dp_ch01_hp1_de_ch01_p0002_s001_t1-2"
+    u_id = "dp_ch01_hp1_de_ch01_p0001_s001#b001_t1-3"
+    c_id = "dp_ch01_hp1_de_ch01_p0002_s001#b001_t1-2"
     assert by_id[u_id]["sampling_status"] == "selected"
     assert by_id[c_id]["sampling_status"] == "selected"
 
@@ -626,7 +629,8 @@ def test_cli_ch10_paths_work(tmp_path: Path) -> None:
         extraction / "hp1_de_ch10_uncontracted.tsv",
         [
             {
-                "sentence_id": "hp1_de_ch10_p0001_s001",
+                "parse_block_id": "hp1_de_ch10_p0001_s001#b001",
+                "source_segment_id": "hp1_de_ch10_p0001_s001",
                 "prep": "in",
                 "det": "dem",
                 "noun": "alpha",
@@ -679,7 +683,8 @@ def test_cli_refuses_overwrite_without_force(tmp_path: Path) -> None:
         extraction / "hp1_de_ch01_uncontracted.tsv",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0001_s001",
+                "parse_block_id": "hp1_de_ch01_p0001_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0001_s001",
                 "prep": "in",
                 "det": "dem",
                 "noun": "alpha",
@@ -712,7 +717,8 @@ def test_cli_stdout_privacy(tmp_path: Path, capsys) -> None:
         extraction / "hp1_de_ch01_uncontracted.tsv",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0001_s001",
+                "parse_block_id": "hp1_de_ch01_p0001_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0001_s001",
                 "prep": "in",
                 "det": "dem",
                 "noun": "alpha",

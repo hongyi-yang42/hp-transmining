@@ -49,7 +49,8 @@ def _load_validator():
 
 
 _EXTRACTION_FIELDS = [
-    "sentence_id",
+    "parse_block_id",
+    "source_segment_id",
     "prep",
     "det",
     "noun",
@@ -127,7 +128,8 @@ def _build_synth_repo(tmp_path: Path) -> dict[str, Path]:
         extraction / "hp1_de_ch01_contracted.tsv",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0001_s001",
+                "parse_block_id": "hp1_de_ch01_p0001_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0001_s001",
                 "prep": "im",
                 "noun": "Haus",
                 "prep_token_id": "1",
@@ -143,7 +145,8 @@ def _build_synth_repo(tmp_path: Path) -> dict[str, Path]:
         extraction / "hp1_de_ch01_uncontracted.tsv",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0002_s001",
+                "parse_block_id": "hp1_de_ch01_p0002_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0002_s001",
                 "prep": "in",
                 "det": "dem",
                 "noun": "Haus",
@@ -491,3 +494,30 @@ def test_all_tsv_columns_includes_integration_additions() -> None:
     ):
         assert col in ALL_TSV_COLUMNS, f"{col!r} missing from ALL_TSV_COLUMNS"
         assert col not in SOURCE_COLUMNS, f"{col!r} must be editable, not source"
+
+
+def test_provenance_check_allows_multiple_pps_per_block(tmp_path: Path) -> None:
+    """Several PP occurrences may share one parse_block_id (different
+    token spans); only the (block, span) occurrence identity is unique."""
+    validator = _load_validator()
+    base = _build_initial_tsv(tmp_path, validator)
+    header, body = _read_tsv(base)
+    assert len(body) >= 1
+    # Two rows in the same block with different spans.
+    row_a = dict(body[0])
+    row_b = dict(body[0])
+    row_b["datapoint_id"] = row_a["datapoint_id"] + "_dup"
+    row_b["de_token_start"] = str(int(row_a["de_token_start"]) + 5)
+    row_b["de_token_end"] = str(int(row_a["de_token_end"]) + 5)
+    tsv_multi = tmp_path / "multi.tsv"
+    _write_tsv(tsv_multi, header, [row_a, row_b])
+    violations, _ = validator.validate_tsv(tsv_multi, full_sample=True)
+    assert not [v for v in violations if "PROVENANCE" in v.rule or "DUPLICATE" in v.rule]
+
+    # Same block AND same span → duplicate occurrence identity.
+    tsv_dup = tmp_path / "dup.tsv"
+    _write_tsv(tsv_dup, header, [row_a, dict(row_a, datapoint_id=row_a["datapoint_id"] + "_x")])
+    violations, _ = validator.validate_tsv(tsv_dup, full_sample=True)
+    rules = {v.rule for v in violations}
+    assert "DUPLICATE_OCCURRENCE_IDENTITY" in rules
+    assert "DUPLICATE_PARSE_BLOCK_ID" not in rules

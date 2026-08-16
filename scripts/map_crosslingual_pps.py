@@ -33,6 +33,7 @@ from hp_corpus.crosslingual_map import (
     MappingResult,
     PPElement,
     Sentence,
+    index_blocks_by_segment,
     parse_conllu,
     propose_for_sides,
 )
@@ -50,9 +51,12 @@ def _load_candidates(path: Path) -> list[dict]:
 
 
 def _load_parsed_chapters(parsed_dir: Path, lang: str, chapters: list[int]) -> dict[str, Sentence]:
-    """Load CoNLL-U for one language across the requested chapters.
+    """Load migrated CoNLL-U for one language across the requested chapters.
 
-    Returns a {sent_id → Sentence} map.
+    Returns a {parse_block_id → Sentence} map. ``parse_conllu`` fails
+    closed on unmigrated or inconsistent provenance. Block ids embed the
+    chapter, so a collision across chapter files would mean corrupt
+    input — fail closed instead of silently overwriting.
     """
     out: dict[str, Sentence] = {}
     for ch in chapters:
@@ -60,7 +64,14 @@ def _load_parsed_chapters(parsed_dir: Path, lang: str, chapters: list[int]) -> d
         if not path.exists():
             print(f"WARN: missing parsed file {path}", file=sys.stderr)
             continue
-        out.update(parse_conllu(path))
+        chapter_sents = parse_conllu(path)
+        overlap = out.keys() & chapter_sents.keys()
+        if overlap:
+            raise ValueError(
+                f"duplicate parse_block_ids across chapter files for {lang}: "
+                f"{len(overlap)} colliding ids (first chapter {ch})"
+            )
+        out.update(chapter_sents)
     return out
 
 
@@ -103,16 +114,40 @@ def _serialize_result(side: str, result: MappingResult) -> dict:
     }
 
 
+def _blocks_for_alignment(
+    alignment_ids: list[str], by_segment: dict[str, list[Sentence]]
+) -> tuple[list[Sentence], int]:
+    """Resolve alignment-level segment ids to their parse blocks.
+
+    ``cand["{lang}_sentence_ids"]`` holds source_segment_id values (the
+    alignment unit), while parsed files are keyed by parse_block_id. A
+    segment the parser split into several blocks contributes **all** its
+    blocks, in document order. Returns ``(blocks, n_unresolved_ids)``;
+    an alignment id that resolves to zero blocks is counted, not
+    silently dropped.
+    """
+    blocks: list[Sentence] = []
+    unresolved = 0
+    for sid in alignment_ids:
+        got = by_segment.get(sid, [])
+        if not got:
+            unresolved += 1
+        blocks.extend(got)
+    return blocks, unresolved
+
+
 def build_mapping_record(
     cand: dict,
-    en_sentences: dict[str, Sentence],
-    zh_sentences: dict[str, Sentence],
+    en_by_segment: dict[str, list[Sentence]],
+    zh_by_segment: dict[str, list[Sentence]],
 ) -> dict:
     """Build one cross-lingual mapping record from a candidate."""
-    en_sents = [en_sentences.get(sid) for sid in cand.get("en_sentence_ids", [])]
-    en_sents = [s for s in en_sents if s is not None]
-    zh_sents = [zh_sentences.get(sid) for sid in cand.get("zh_sentence_ids", [])]
-    zh_sents = [s for s in zh_sents if s is not None]
+    en_sents, en_unresolved = _blocks_for_alignment(
+        cand.get("en_sentence_ids", []), en_by_segment
+    )
+    zh_sents, zh_unresolved = _blocks_for_alignment(
+        cand.get("zh_sentence_ids", []), zh_by_segment
+    )
 
     en_result, zh_result = propose_for_sides(
         de_prep_normalized=cand["de_prep_normalized"],
@@ -127,7 +162,8 @@ def build_mapping_record(
     record: dict = {
         "datapoint_id": cand["datapoint_id"],
         "chapter": cand["chapter"],
-        "de_sentence_id": cand["de_sentence_id"],
+        "de_parse_block_id": cand["de_parse_block_id"],
+        "de_source_segment_id": cand["de_source_segment_id"],
         "de_token_start": cand["de_token_start"],
         "de_token_end": cand["de_token_end"],
         "de_pp_surface": cand["de_pp_surface"],
@@ -141,6 +177,8 @@ def build_mapping_record(
         "zh_alignment_confidence": cand["zh_alignment_confidence"],
         "n_en_sentences_seen": len(en_sents),
         "n_zh_sentences_seen": len(zh_sents),
+        "n_en_alignment_ids_unresolved": en_unresolved,
+        "n_zh_alignment_ids_unresolved": zh_unresolved,
     }
     record.update(_serialize_result("en", en_result))
     record.update(_serialize_result("zh", zh_result))
@@ -181,6 +219,9 @@ def summarize(records: list[dict]) -> dict:
         bucket = by_chapter.setdefault(ch, {"matched": 0, "candidate": 0, "unmappable": 0})
         bucket[r["en_status"]] += 1  # EN-side status per chapter as a representative cut
 
+    en_unresolved = sum(r["n_en_alignment_ids_unresolved"] for r in records)
+    zh_unresolved = sum(r["n_zh_alignment_ids_unresolved"] for r in records)
+
     return {
         "record_total": len(records),
         "en_status": dict(en_status),
@@ -191,6 +232,8 @@ def summarize(records: list[dict]) -> dict:
         "en_score_distribution": {str(k): v for k, v in sorted(en_score_buckets.items())},
         "zh_score_distribution": {str(k): v for k, v in sorted(zh_score_buckets.items())},
         "per_chapter_en_status": {str(k): v for k, v in sorted(by_chapter.items())},
+        "en_alignment_ids_unresolved": en_unresolved,
+        "zh_alignment_ids_unresolved": zh_unresolved,
     }
 
 
@@ -242,13 +285,22 @@ def main(argv: list[str] | None = None) -> int:
     chapters = sorted({int(c["chapter"]) for c in selected})
     en_parsed = _load_parsed_chapters(args.parsed_dir, "en", chapters)
     zh_parsed = _load_parsed_chapters(args.parsed_dir, "zh", chapters)
+    en_by_segment = index_blocks_by_segment(en_parsed)
+    zh_by_segment = index_blocks_by_segment(zh_parsed)
 
     records: list[dict] = []
     for cand in selected:
-        records.append(build_mapping_record(cand, en_parsed, zh_parsed))
+        records.append(build_mapping_record(cand, en_by_segment, zh_by_segment))
 
     # Stable-sort for reproducible output.
-    records.sort(key=lambda r: (r["chapter"], r["de_sentence_id"], r["de_token_start"]))
+    records.sort(
+        key=lambda r: (
+            r["chapter"],
+            r["de_source_segment_id"],
+            r["de_parse_block_id"],
+            r["de_token_start"],
+        )
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     out_jsonl = args.output_dir / "crosslingual_mappings.jsonl"
@@ -277,6 +329,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  EN status: {summary['en_status']}")
     print(f"  ZH status: {summary['zh_status']}")
     print(f"  both EN and ZH 'matched': {summary['both_status'].get('matched|matched', 0)}")
+    print(
+        f"  unresolved alignment segment ids: "
+        f"EN={summary['en_alignment_ids_unresolved']} "
+        f"ZH={summary['zh_alignment_ids_unresolved']}"
+    )
     print("outputs:")
     print(f"  {out_jsonl}")
     print(f"  {out_summary}")

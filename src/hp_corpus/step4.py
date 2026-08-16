@@ -141,7 +141,8 @@ SOURCE_COLUMNS: tuple[str, ...] = (
     "dataset_scope",
     "paper_final_sample",
     "chapter",
-    "de_sentence_id",
+    "de_parse_block_id",
+    "de_source_segment_id",
     "de_token_start",
     "de_token_end",
     "de_pp_surface",
@@ -292,10 +293,11 @@ class MissingInputsError(Step4Error):
 
 
 class UnresolvedSegmentIdError(Step4Error):
-    """A DE sentence_id from the extraction TSV does not resolve to a segment
-    in the segmented JSONL, or a target segment ID listed in an alignment
-    record does not resolve. Indicates an upstream pipeline integrity
-    failure; the builder refuses to emit a row with empty sentence text.
+    """A DE source_segment_id from the extraction TSV does not resolve to a
+    segment in the segmented JSONL, a row lacks block-level provenance
+    columns, or a target segment ID listed in an alignment record does
+    not resolve. Indicates an upstream pipeline integrity failure; the
+    builder refuses to emit a row with empty sentence text.
     """
 
 
@@ -662,10 +664,12 @@ def build_candidates(
     TSVs are rejected as upstream failures.
 
     Raises :class:`MissingInputsError` if any requested chapter is missing
-    a required input file, and :class:`UnresolvedSegmentIdError` if a
-    DE sentence_id from the extraction TSV cannot be resolved against the
-    segmented JSONL. Both errors signal upstream integrity failures; the
-    builder never emits a partial-corpus or empty-sentence TSV.
+    a required input file, and :class:`UnresolvedSegmentIdError` if an
+    extraction row is missing its parse_block_id / source_segment_id
+    provenance columns or its source_segment_id cannot be resolved
+    against the segmented JSONL. Both errors signal upstream integrity
+    failures; the builder never emits a partial-corpus or empty-sentence
+    TSV.
     """
     chapters = list(chapters)
     _assert_inputs_present(
@@ -690,14 +694,20 @@ def build_candidates(
             if not tsv_path.exists():
                 continue
             for row in _read_extraction_tsv(tsv_path):
-                sent_id = row["sentence_id"]
+                block_id = row.get("parse_block_id", "")
+                sent_id = row.get("source_segment_id", "")
+                if not block_id or not sent_id:
+                    raise UnresolvedSegmentIdError(
+                        f"extraction row (chapter {ch}, {kind}) is missing "
+                        "parse_block_id / source_segment_id provenance columns"
+                    )
                 de_seg = de_segments.get(sent_id)
                 if de_seg is None:
                     # Data-integrity failure — extraction TSV references a
-                    # sentence the segmented JSONL doesn't have. Fail loudly
+                    # segment the segmented JSONL doesn't have. Fail loudly
                     # rather than emit a row with empty sentence text.
                     raise UnresolvedSegmentIdError(
-                        f"DE sentence id {sent_id!r} (chapter {ch}, {kind}) "
+                        f"DE segment id {sent_id!r} (chapter {ch}, {kind}) "
                         f"is not present in {segmented_dir}/hp1_de_ch{ch:02d}.jsonl"
                     )
                 de_sentence_text = de_seg.text
@@ -719,12 +729,14 @@ def build_candidates(
                 de_side_zh = zh_rec.side_for_lang("de") if zh_rec else None
 
                 candidate = {
-                    "datapoint_id": _make_datapoint_id(ch, sent_id, token_start, token_end),
+                    "datapoint_id": _make_datapoint_id(ch, block_id, token_start, token_end),
                     "dataset_scope": DATASET_SCOPE,
                     "paper_final_sample": PAPER_FINAL_SAMPLE,
                     "chapter": ch,
-                    # German occurrence
-                    "de_sentence_id": sent_id,
+                    # German occurrence (block-level provenance; the segment
+                    # id is kept separately for alignment/context joins)
+                    "de_parse_block_id": block_id,
+                    "de_source_segment_id": sent_id,
                     "de_token_start": token_start,
                     "de_token_end": token_end,
                     "de_pp_surface": row["pp_surface"],
@@ -763,20 +775,23 @@ def build_candidates(
     return candidates
 
 
-def _make_datapoint_id(chapter: int, sentence_id: str, token_start: int, token_end: int) -> str:
+def _make_datapoint_id(chapter: int, parse_block_id: str, token_start: int, token_end: int) -> str:
     """Deterministic, human-readable occurrence ID.
 
-    Identity = (chapter, sentence_id, token_start, token_end). Two PPs
-    in the same sentence with the same (prep, noun) get different IDs
-    because their token ranges differ.
+    Identity = (chapter, parse_block_id, token_start, token_end). The
+    block-level id means two PPs extracted from different parse blocks
+    of one segment always get different datapoint ids, and two PPs in
+    the same block with the same (prep, noun) still differ by token
+    range.
     """
-    return f"dp_ch{chapter:02d}_{sentence_id}_t{token_start}-{token_end}"
+    return f"dp_ch{chapter:02d}_{parse_block_id}_t{token_start}-{token_end}"
 
 
 def _stable_sort_key(cand: dict[str, Any]) -> tuple[Any, ...]:
     return (
         int(cand["chapter"]),
-        str(cand["de_sentence_id"]),
+        str(cand["de_source_segment_id"]),
+        str(cand["de_parse_block_id"]),
         int(cand["de_token_start"]),
         int(cand["de_token_end"]),
     )

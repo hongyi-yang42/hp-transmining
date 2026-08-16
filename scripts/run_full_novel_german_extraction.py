@@ -1,28 +1,27 @@
 """Full-novel German PP extraction with chapter manifests.
 
-SUPERADES ``scripts/run_paper_extractor.py`` for full-novel (Ch.1–17)
-extraction. The older script stays in the tree for ongoing Ch.1–3 work,
-but it has two full-novel blockers that make it unsafe past Ch.9:
+The single implementation of the paper's extractor (see
+:func:`hp_corpus.german_extraction.extract_chapter`). It replaced the
+original Ch.1–3 ``scripts/run_paper_extractor.py``, which had two
+full-novel blockers:
 
-1. **Filename bug** (``run_paper_extractor.py:202``): the format string
-   ``f"hp1_de_ch0{ch}_nomwt.conllu"`` produces ``hp1_de_ch010_nomwt.conllu``
-   for ``ch >= 10`` instead of ``hp1_de_ch10_nomwt.conllu``. Any chapter
-   ≥ 10 silently fails to be found.
-2. **Silent skip of missing inputs** (``run_paper_extractor.py:204``):
-   a missing .conllu file is logged to stderr then ``continue``'d, so
-   an upstream pipeline failure (forgotten parse step, partial run)
-   produces an empty TSV without any error.
+1. **Filename bug**: the format string ``f"hp1_de_ch0{ch}_nomwt.conllu"``
+   produced ``hp1_de_ch010_nomwt.conllu`` for ``ch >= 10`` instead of
+   ``hp1_de_ch10_nomwt.conllu``. Any chapter ≥ 10 silently failed to be
+   found.
+2. **Silent skip of missing inputs**: a missing .conllu file was logged
+   to stderr then skipped, so an upstream pipeline failure (forgotten
+   parse step, partial run) produced an empty TSV without any error.
 
-This script fixes both:
+That legacy script is now a deprecated thin wrapper that delegates here.
 
-* All chapter paths use ``f"hp1_de_ch{ch:02d}_..."`` zero-padding.
-* Missing inputs raise ``MissingParsedInputError`` by default; pass
-  ``--allow-missing`` to record ``status="missing_input"`` in the
-  manifest and continue. Empty / corrupt inputs always fail closed.
+This script:
 
-The extraction ALGORITHM is identical to ``run_paper_extractor.extract``
-(see :func:`hp_corpus.german_extraction.extract_chapter`). What's new is
-the I/O wrapper, the per-chapter manifest, and the fail-closed rules.
+* Uses ``f"hp1_de_ch{ch:02d}_..."`` zero-padding everywhere.
+* Raises ``MissingParsedInputError`` by default; pass ``--allow-missing``
+  to record ``status="missing_input"`` in the manifest and continue.
+  Empty / corrupt inputs always fail closed.
+* Emits ``parse_block_id`` + ``source_segment_id`` on every TSV row.
 
 The manifest is a JSON array with one entry per (chapter, form) pair.
 Each entry captures the parsed-file SHA-256, size, sentence count, the
@@ -74,10 +73,16 @@ from hp_corpus.german_extraction import (  # noqa: E402
     RULE_EMPTY,
     RULE_FAILED,
     RULE_MISSING,
+    RULE_PROVENANCE_DUP,
+    RULE_PROVENANCE_INCONSISTENT,
+    RULE_PROVENANCE_MISSING,
     EmptyParsedInputError,
     ExtractionFailedError,
     GermanExtractionError,
     MissingParsedInputError,
+    ProvenanceDuplicateError,
+    ProvenanceInconsistentError,
+    ProvenanceMissingError,
     chapter_manifest,
     extract_chapter,
     validate_against_filters,
@@ -199,6 +204,18 @@ def main(argv: list[str] | None = None) -> int:
             except EmptyParsedInputError:
                 print(f"Ch.{chapter}: {RULE_EMPTY}", file=sys.stderr)
                 print(f"rule: {RULE_EMPTY}", file=sys.stderr)
+                return 1
+            except ProvenanceMissingError:
+                print(f"Ch.{chapter}: {RULE_PROVENANCE_MISSING}", file=sys.stderr)
+                print(f"rule: {RULE_PROVENANCE_MISSING}", file=sys.stderr)
+                return 1
+            except ProvenanceDuplicateError:
+                print(f"Ch.{chapter}: {RULE_PROVENANCE_DUP}", file=sys.stderr)
+                print(f"rule: {RULE_PROVENANCE_DUP}", file=sys.stderr)
+                return 1
+            except ProvenanceInconsistentError:
+                print(f"Ch.{chapter}: {RULE_PROVENANCE_INCONSISTENT}", file=sys.stderr)
+                print(f"rule: {RULE_PROVENANCE_INCONSISTENT}", file=sys.stderr)
                 return 1
             except ExtractionFailedError as exc:
                 print(f"Ch.{chapter}: {RULE_FAILED}", file=sys.stderr)

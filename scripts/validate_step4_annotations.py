@@ -42,6 +42,10 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from hp_corpus.provenance import (
+    MalformedParseBlockIdError,
+    split_parse_block_id,
+)
 from hp_corpus.step4 import (
     ADJUDICATION_STATUSES,
     ALIGNMENT_QC_VALUES,
@@ -165,6 +169,55 @@ def _check_unique_datapoint_ids(rows: list[dict[str, str]]) -> list[Violation]:
             )
         else:
             seen[dp] = idx
+    return out
+
+
+def _check_parse_block_provenance(rows: list[dict[str, str]]) -> list[Violation]:
+    """Fail-closed structural check for block-level provenance columns.
+
+    Every row must carry a non-empty ``de_parse_block_id`` of the form
+    ``<segment_id>#bNNN`` that extends its non-empty
+    ``de_source_segment_id``. Several rows MAY share one parse_block_id
+    (one block can yield several PPs); the occurrence identity
+    ``(de_parse_block_id, de_token_start, de_token_end)`` must be unique.
+    """
+    out: list[Violation] = []
+    seen: dict[tuple[str, str, str], int] = {}
+    for idx, r in enumerate(rows, start=2):
+        pid = r.get("de_parse_block_id", "")
+        sid = r.get("de_source_segment_id", "")
+        if not sid:
+            out.append(Violation("MISSING_PROVENANCE", "de_source_segment_id empty", row=idx))
+            continue
+        if not pid:
+            out.append(Violation("MISSING_PROVENANCE", "de_parse_block_id empty", row=idx))
+            continue
+        try:
+            parsed_sid, _ = split_parse_block_id(pid)
+        except MalformedParseBlockIdError:
+            out.append(
+                Violation("MALFORMED_PARSE_BLOCK_ID", f"not '<segment>#bNNN': {pid}", row=idx)
+            )
+            continue
+        if parsed_sid != sid:
+            out.append(
+                Violation(
+                    "INCONSISTENT_PROVENANCE",
+                    f"de_parse_block_id {pid} does not extend de_source_segment_id {sid}",
+                    row=idx,
+                )
+            )
+            continue
+        key = (pid, r.get("de_token_start", ""), r.get("de_token_end", ""))
+        if key in seen:
+            out.append(
+                Violation(
+                    "DUPLICATE_OCCURRENCE_IDENTITY",
+                    f"(de_parse_block_id, span) appears at rows {seen[key]} and {idx}",
+                )
+            )
+        else:
+            seen[key] = idx
     return out
 
 
@@ -770,6 +823,7 @@ def validate_tsv(
 
     violations.extend(_check_nonempty_body(body))
     violations.extend(_check_unique_datapoint_ids(body))
+    violations.extend(_check_parse_block_provenance(body))
     # The pilot-balance check (exactly 10+10) only applies to the method
     # pilot. Skip it for the annotation-target TSV, whose row count is
     # determined by the source text.

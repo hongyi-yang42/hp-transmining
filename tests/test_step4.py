@@ -46,9 +46,10 @@ def _load_validator():
 
 
 def _write_extraction_tsv(path: Path, kind: str, rows: list[dict[str, Any]]) -> None:
-    """Write an extraction TSV in the same format as run_paper_extractor.py."""
+    """Write an extraction TSV in the same format as the migrated extractor."""
     fields = [
-        "sentence_id",
+        "parse_block_id",
+        "source_segment_id",
         "prep",
         "det",
         "noun",
@@ -131,13 +132,15 @@ def _build_synth_repo(tmp_path: Path) -> dict[str, Path]:
 
     # German extraction — two sentences, both forms, one minimal-pair group
     # ("in|Haus"), plus a same-(prep,noun) duplicate in s001 to test that
-    # occurrences stay distinguishable.
+    # occurrences stay distinguishable. The parser split s001 into two
+    # parse blocks (#b001 / #b002), one PP per block.
     _write_extraction_tsv(
         extraction / "hp1_de_ch01_contracted.tsv",
         "contracted",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0001_s001",
+                "parse_block_id": "hp1_de_ch01_p0001_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0001_s001",
                 "prep": "im",
                 "noun": "Haus",
                 "prep_token_id": "1",
@@ -148,8 +151,10 @@ def _build_synth_repo(tmp_path: Path) -> dict[str, Path]:
                 "in_filter": "Y",
             },
             {
-                # Same (prep, noun) again — must NOT be deduped.
-                "sentence_id": "hp1_de_ch01_p0001_s001",
+                # Same (prep, noun) again in the segment's second parse
+                # block — must NOT be deduped.
+                "parse_block_id": "hp1_de_ch01_p0001_s001#b002",
+                "source_segment_id": "hp1_de_ch01_p0001_s001",
                 "prep": "im",
                 "noun": "Haus",
                 "prep_token_id": "5",
@@ -160,7 +165,8 @@ def _build_synth_repo(tmp_path: Path) -> dict[str, Path]:
                 "in_filter": "Y",
             },
             {
-                "sentence_id": "hp1_de_ch01_p0002_s001",
+                "parse_block_id": "hp1_de_ch01_p0002_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0002_s001",
                 "prep": "im",
                 "noun": "Wald",
                 "prep_token_id": "1",
@@ -177,7 +183,8 @@ def _build_synth_repo(tmp_path: Path) -> dict[str, Path]:
         "uncontracted",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0003_s001",
+                "parse_block_id": "hp1_de_ch01_p0003_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0003_s001",
                 "prep": "in",
                 "det": "dem",
                 "noun": "Haus",
@@ -191,7 +198,8 @@ def _build_synth_repo(tmp_path: Path) -> dict[str, Path]:
             },
             {
                 # Different group; will be eligible only via stable-fill.
-                "sentence_id": "hp1_de_ch01_p0004_s001",
+                "parse_block_id": "hp1_de_ch01_p0004_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0004_s001",
                 "prep": "an",
                 "det": "dem",
                 "noun": "Baum",
@@ -422,7 +430,7 @@ def test_two_occurrences_same_prep_noun_distinguishable(tmp_path: Path) -> None:
     s001 = [
         c
         for c in candidates
-        if c["de_sentence_id"] == "hp1_de_ch01_p0001_s001" and c["de_form"] == "contracted"
+        if c["de_source_segment_id"] == "hp1_de_ch01_p0001_s001" and c["de_form"] == "contracted"
     ]
     assert len(s001) == 2
     assert s001[0]["de_head_lemma"] == s001[1]["de_head_lemma"] == "Haus"
@@ -471,7 +479,7 @@ def test_one_to_one_alignment_carried_through(tmp_path: Path) -> None:
     cand = next(
         c
         for c in candidates
-        if c["de_sentence_id"] == "hp1_de_ch01_p0003_s001" and c["de_form"] == "uncontracted"
+        if c["de_source_segment_id"] == "hp1_de_ch01_p0003_s001" and c["de_form"] == "uncontracted"
     )
     assert cand["en_alignment_cardinality"] == "1:1"
     assert cand["zh_alignment_cardinality"] == "1:1"
@@ -493,7 +501,7 @@ def test_one_to_two_alignment_preserved(tmp_path: Path) -> None:
     cand = next(
         c
         for c in candidates
-        if c["de_sentence_id"] == "hp1_de_ch01_p0001_s001" and c["de_form"] == "contracted"
+        if c["de_source_segment_id"] == "hp1_de_ch01_p0001_s001" and c["de_form"] == "contracted"
     )
     assert cand["zh_alignment_cardinality"] == "1:2"
     assert cand["zh_sentence_ids"] == [
@@ -517,7 +525,7 @@ def test_legacy_en_zh_keys_decoded_by_segment_id(tmp_path: Path) -> None:
     # Sanity: every candidate has its DE sentence id, and at least one EN/ZH
     # target sentence id with the right language prefix (when status=aligned).
     for c in candidates:
-        assert c["de_sentence_id"].startswith("hp1_de_")
+        assert c["de_source_segment_id"].startswith("hp1_de_")
         if c["en_alignment_status"] == "aligned":
             for sid in c["en_sentence_ids"]:
                 assert sid.startswith("hp1_en_"), sid
@@ -544,7 +552,8 @@ def test_missing_alignment_status_flagged(tmp_path: Path) -> None:
         "contracted",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0005_s001",
+                "parse_block_id": "hp1_de_ch01_p0005_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0005_s001",
                 "prep": "im",
                 "noun": "Haus",
                 "prep_token_id": "1",
@@ -562,7 +571,7 @@ def test_missing_alignment_status_flagged(tmp_path: Path) -> None:
         aligned_dir=paths["aligned_dir"],
         chapters=[1],
     )
-    missing = [c for c in candidates if c["de_sentence_id"] == "hp1_de_ch01_p0005_s001"]
+    missing = [c for c in candidates if c["de_source_segment_id"] == "hp1_de_ch01_p0005_s001"]
     assert missing, "expected one candidate at p0005_s001"
     assert missing[0]["en_alignment_status"] == "missing"
     # ZH side also doesn't have p0005 in our fixture.
@@ -646,7 +655,8 @@ def test_pilot_excludes_unaligned_candidates(tmp_path: Path) -> None:
         "contracted",
         [
             {
-                "sentence_id": "hp1_de_ch01_p0001_s001",
+                "parse_block_id": "hp1_de_ch01_p0001_s001#b001",
+                "source_segment_id": "hp1_de_ch01_p0001_s001",
                 "prep": "im",
                 "noun": "Haus",
                 "prep_token_id": "1",
@@ -657,7 +667,8 @@ def test_pilot_excludes_unaligned_candidates(tmp_path: Path) -> None:
                 "in_filter": "Y",
             },
             {
-                "sentence_id": "hp1_de_ch01_p0005_s001",  # missing alignment
+                "parse_block_id": "hp1_de_ch01_p0005_s001#b001",  # missing alignment
+                "source_segment_id": "hp1_de_ch01_p0005_s001",
                 "prep": "im",
                 "noun": "Haus",
                 "prep_token_id": "1",
@@ -677,7 +688,7 @@ def test_pilot_excludes_unaligned_candidates(tmp_path: Path) -> None:
     )
     sel, summary = select_pilot(candidates, n_contracted=1, n_uncontracted=1)
     # The p0005 candidate (missing alignment) must NOT appear.
-    assert all(c["de_sentence_id"] != "hp1_de_ch01_p0005_s001" for c in sel)
+    assert all(c["de_source_segment_id"] != "hp1_de_ch01_p0005_s001" for c in sel)
 
 
 def test_source_row_sha256_changes_when_source_edited(tmp_path: Path) -> None:
@@ -1480,7 +1491,7 @@ def test_build_candidates_fails_on_header_only_tsv(tmp_path: Path) -> None:
     # Overwrite with a header-only file.
     from hp_corpus.step4 import SOURCE_COLUMNS as _SC  # noqa: F401 (sanity)
     fields = [
-        "sentence_id", "prep", "det", "noun",
+        "parse_block_id", "source_segment_id", "prep", "det", "noun",
         "prep_token_id", "det_token_id", "noun_token_id",
         "pp_token_start", "pp_token_end", "pp_surface", "in_filter",
     ]
@@ -1522,7 +1533,8 @@ def test_build_candidates_fails_on_unresolvable_de_segment_id(tmp_path: Path) ->
         "contracted",
         [
             {
-                "sentence_id": "hp1_de_ch01_p9999_s999",  # not in segments
+                "parse_block_id": "hp1_de_ch01_p9999_s999#b001",
+                "source_segment_id": "hp1_de_ch01_p9999_s999",  # not in segments
                 "prep": "im",
                 "noun": "Haus",
                 "prep_token_id": "1",

@@ -13,12 +13,12 @@ A 100% match against the paper's `FILTER_CONTRACTED_123` / `FILTER_PP` is theref
 
 ## Extraction logic (Step 1–3)
 
-`scripts/run_paper_extractor.py` follows the paper's `time-in-translation/conll-extractor` (vendored at `vendor/conll-extractor/`, gitignored):
+`scripts/run_full_novel_german_extraction.py` (backed by `src/hp_corpus/german_extraction.py`) follows the paper's `time-in-translation/conll-extractor` (vendored at `vendor/conll-extractor/`, gitignored). The older `scripts/run_paper_extractor.py` is a deprecated thin wrapper that delegates to it:
 
 - **Contracted PPs**: tokens in `CONTRACTED` (`im`, `am`, `zum`, …) → extract `(prep, noun)` where the prep's head is an `NN`.
 - **Uncontracted PPs**: `PREPOSITIONS` tokens whose same-head dependent is an `ART` in `DETERMINERS` (`der`/`dem`/`den`/…) → extract `(prep, det, noun)`.
 
-Each row in `data/extracted/hp1_de_ch{NN}_{contracted,uncontracted}.tsv` carries occurrence coordinates (`prep_token_id`, `det_token_id`, `noun_token_id`, `pp_token_start`, `pp_token_end`, `pp_surface`) so two PPs that share `(preposition, noun)` within one sentence can be told apart. Coordinates are CoNLL-U token IDs from the `_nomwt.conllu` files.
+Each row in `data/extracted/hp1_de_ch{NN}_{contracted,uncontracted}.tsv` carries two-level provenance (`parse_block_id`, `source_segment_id`) plus occurrence coordinates (`prep_token_id`, `det_token_id`, `noun_token_id`, `pp_token_start`, `pp_token_end`, `pp_surface`) so two PPs that share `(preposition, noun)` within one sentence can be told apart. Coordinates are CoNLL-U token IDs from the `_nomwt.conllu` files; `parse_block_id` (`<segment_id>#bNNN`) identifies the exact parsed block, `source_segment_id` the alignment-level sentence.
 
 Hits are validated against `FILTER_CONTRACTED_123` and `FILTER_PP` from `conll_extractor.prepositions.data`.
 

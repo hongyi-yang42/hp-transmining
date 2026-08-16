@@ -47,7 +47,8 @@ from hp_corpus.step4 import ALL_TSV_COLUMNS
 QUEUE_COLUMNS = [
     "datapoint_id",
     "chapter",
-    "de_sentence_id",
+    "de_parse_block_id",
+    "de_source_segment_id",
     "de_pp_surface",
     "de_form",
     "de_candidate_decision",
