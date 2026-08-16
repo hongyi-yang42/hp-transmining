@@ -54,9 +54,12 @@ For Ch.1–3 every requested chapter must contribute a full input set: both cont
 ### Module layout
 
 - `src/hp_corpus/step4.py` — pure-Python builder, pilot selector, and TSV writer.
-- `scripts/build_step4_annotation_pack.py` — CLI wrapper that wires file paths.
-- `scripts/validate_step4_annotations.py` — CLI validator.
+- `scripts/build_step4_annotation_pack.py` — CLI wrapper that wires file paths (Ch.1–3 method pilot).
 - `tests/test_step4.py` — synthetic-fixture tests; no novel text.
+
+The full-novel annotation surface is the trilingual pair CSV built from the
+machine master — see [`ANNOTATION_CSV.md`](./ANNOTATION_CSV.md) and
+[`FULL_NOVEL_SAMPLING.md`](./FULL_NOVEL_SAMPLING.md).
 
 ### Alignment compatibility
 
@@ -82,7 +85,8 @@ Each pilot row carries `source_row_sha256` over the immutable source columns. Th
 
 ### Annotation schema
 
-See [`STEP4_ANNOTATION.md`](./STEP4_ANNOTATION.md) for the column-by-column annotation guide.
+See [`ANNOTATION_CSV.md`](./ANNOTATION_CSV.md) for the annotator-facing
+trilingual pair CSV (column-by-column guide and vocabularies).
 
 ## Output discipline
 
@@ -90,4 +94,4 @@ Per-PP detail goes only to TSV files under `data/extracted/` (gitignored). The S
 
 - `tests/test_run_paper_extractor.py` — extractor stdout guard.
 - `tests/test_step4.py::test_summary_no_token_text` — Step 4 summary guard.
-- `tests/test_step4.py::test_validator_stdout_no_source_text` — validator stdout guard.
+- `tests/test_annotation_csv.py` / `tests/test_annotation_csv_validation.py` — annotation-CSV builder/validator stdout guards.

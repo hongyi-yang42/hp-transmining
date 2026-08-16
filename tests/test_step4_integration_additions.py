@@ -21,7 +21,6 @@ What this locks down for downstream work packages:
 from __future__ import annotations
 
 import csv
-import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -34,19 +33,6 @@ from hp_corpus.step4 import (
     select_pilot,
     write_pilot_tsv,
 )
-
-SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "validate_step4_annotations.py"
-
-
-def _load_validator():
-    spec = importlib.util.spec_from_file_location("validate_step4_annotations", SCRIPT_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-# --------------------------------------------------------------------- fixtures
-
 
 _EXTRACTION_FIELDS = [
     "parse_block_id",
@@ -303,183 +289,6 @@ def test_builder_default_editable_constants_exist() -> None:
     assert BUILDER_DEFAULT_EDITABLE["zh_alignment_qc"] == "assumed_ok"
 
 
-def test_initial_state_treated_as_unannotated(tmp_path: Path, monkeypatch) -> None:
-    """A fresh TSV (builder defaults only) must still pass the validator
-    with initial_state=True — the builder defaults do not count as
-    annotation."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    violations, summary = validator.validate_tsv(tsv)
-    assert summary["initial_state"] is True
-    assert violations == [], [str(v) for v in violations]
-
-
-def test_require_complete_rejects_fresh_template(tmp_path: Path, monkeypatch) -> None:
-    """``--require-complete`` on an unannotated template must surface
-    per-row completion violations and a non-None rollup. The rollup's
-    ``pending`` bucket must equal the row count."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    violations, summary = validator.validate_tsv(tsv, require_complete=True)
-    rules = {v.rule for v in violations}
-    assert "REQUIRE_COMPLETE_DECISION_MISSING" in rules
-    assert summary["rollup"] is not None
-    assert summary["rollup"]["pending"] == 2
-    assert summary["rollup"]["completed"] == 0
-
-
-def test_require_complete_passes_when_all_rows_completed_or_excluded(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """One row fully completed + one row excluded → no violations, rollup
-    completed=1 / excluded=1."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    header, body = _read_tsv(tsv)
-    # Row 0 (contracted, en="synth EN one", zh="synth ZH one") → completed
-    _fully_annotate_row(body[0], en_text="synth EN one", zh_text="synth ZH one")
-    # Row 1 (uncontracted) → excluded with a reason
-    body[1]["de_candidate_decision"] = "exclude"
-    body[1]["de_exclusion_reason"] = "not_target_pp"
-    _write_tsv(tsv, header, body)
-    violations, summary = validator.validate_tsv(tsv, require_complete=True)
-    assert violations == [], [str(v) for v in violations]
-    assert summary["rollup"]["completed"] == 1
-    assert summary["rollup"]["excluded"] == 1
-
-
-def test_require_complete_fails_when_alignment_qc_not_confirmed(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """include + complete but en_alignment_qc still at assumed_ok must
-    fail REQUIRE_COMPLETE_NOT_CONFIRMED for EN."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    header, body = _read_tsv(tsv)
-    _fully_annotate_row(body[0], en_text="synth EN one", zh_text="synth ZH one")
-    body[0]["en_alignment_qc"] = "assumed_ok"  # regress to builder default
-    body[1]["de_candidate_decision"] = "exclude"
-    body[1]["de_exclusion_reason"] = "not_target_pp"
-    _write_tsv(tsv, header, body)
-    violations, _ = validator.validate_tsv(tsv, require_complete=True)
-    rules = {v.rule for v in violations}
-    assert "REQUIRE_COMPLETE_NOT_CONFIRMED" in rules
-
-
-def test_require_complete_uncertain_counted_but_not_completed(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """An uncertain row does not trigger REQUIRE_COMPLETE violations on
-    its own (the rollup counts it separately), but the rollup must
-    reflect it as uncertain — never as completed."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    header, body = _read_tsv(tsv)
-    _fully_annotate_row(body[0], en_text="synth EN one", zh_text="synth ZH one")
-    body[1]["de_candidate_decision"] = "uncertain"
-    body[1]["de_candidate_notes"] = "synth review note"
-    _write_tsv(tsv, header, body)
-    violations, summary = validator.validate_tsv(tsv, require_complete=True)
-    assert summary["rollup"]["completed"] == 1
-    assert summary["rollup"]["uncertain"] == 1
-    # The uncertain row itself produces no REQUIRE_COMPLETE_* violation;
-    # only the missing completion on row 0's partner would. Row 0 is clean.
-    rc_violations = [v for v in violations if v.rule.startswith("REQUIRE_COMPLETE_")]
-    assert rc_violations == [], [str(v) for v in rc_violations]
-
-
-def test_de_candidate_decision_vocab_enforced(tmp_path: Path, monkeypatch) -> None:
-    """An out-of-vocab de_candidate_decision must surface BAD_VOCAB."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    header, body = _read_tsv(tsv)
-    body[0]["de_candidate_decision"] = "rejected"  # not in vocab
-    _write_tsv(tsv, header, body)
-    violations, _ = validator.validate_tsv(tsv)
-    rules = {v.rule for v in violations}
-    assert "BAD_VOCAB" in rules
-    vocab_msgs = [v for v in violations if "de_candidate_decision" in v.message]
-    assert vocab_msgs, [str(v) for v in violations]
-
-
-def test_alignment_qc_vocab_enforced(tmp_path: Path, monkeypatch) -> None:
-    """An out-of-vocab en_alignment_qc must surface BAD_VOCAB."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    header, body = _read_tsv(tsv)
-    body[0]["en_alignment_qc"] = "perfect"  # not in vocab
-    _write_tsv(tsv, header, body)
-    violations, _ = validator.validate_tsv(tsv)
-    rules = {v.rule for v in violations}
-    assert "BAD_VOCAB" in rules
-    qc_msgs = [v for v in violations if "en_alignment_qc" in v.message]
-    assert qc_msgs, [str(v) for v in violations]
-
-
-def test_exclude_without_reason_fails(tmp_path: Path, monkeypatch) -> None:
-    """de_candidate_decision=exclude with blank reason must surface
-    EXCLUDE_NEEDS_REASON."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    header, body = _read_tsv(tsv)
-    body[0]["de_candidate_decision"] = "exclude"
-    # reason intentionally left blank
-    _write_tsv(tsv, header, body)
-    violations, _ = validator.validate_tsv(tsv)
-    rules = {v.rule for v in violations}
-    assert "EXCLUDE_NEEDS_REASON" in rules
-
-
-def test_uncertain_without_notes_fails(tmp_path: Path, monkeypatch) -> None:
-    """de_candidate_decision=uncertain with blank notes must surface
-    UNCERTAIN_NEEDS_NOTES."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    header, body = _read_tsv(tsv)
-    body[0]["de_candidate_decision"] = "uncertain"
-    _write_tsv(tsv, header, body)
-    violations, _ = validator.validate_tsv(tsv)
-    rules = {v.rule for v in violations}
-    assert "UNCERTAIN_NEEDS_NOTES" in rules
-
-
-def test_require_complete_via_main_exit_code(tmp_path: Path, monkeypatch) -> None:
-    """The CLI ``main(["--require-complete", ...])`` returns 1 on a fresh
-    template and 0 on a fully-completed-or-excluded TSV."""
-    validator = _load_validator()
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_CONTRACTED", 1)
-    monkeypatch.setattr(validator, "PILOT_DEFAULT_N_UNCONTRACTED", 1)
-    tsv = _build_initial_tsv(tmp_path, validator)
-    rc = validator.main([str(tsv), "--annotation-pool", "--require-complete"])
-    assert rc == 1
-
-    header, body = _read_tsv(tsv)
-    _fully_annotate_row(body[0], en_text="synth EN one", zh_text="synth ZH one")
-    body[1]["de_candidate_decision"] = "exclude"
-    body[1]["de_exclusion_reason"] = "duplicate"
-    _write_tsv(tsv, header, body)
-    rc = validator.main([str(tsv), "--annotation-pool", "--require-complete"])
-    assert rc == 0
-
-
 def test_all_tsv_columns_includes_integration_additions() -> None:
     """The integration additions must appear in ALL_TSV_COLUMNS so the
     validator's header check accepts TSVs that include them."""
@@ -494,30 +303,3 @@ def test_all_tsv_columns_includes_integration_additions() -> None:
     ):
         assert col in ALL_TSV_COLUMNS, f"{col!r} missing from ALL_TSV_COLUMNS"
         assert col not in SOURCE_COLUMNS, f"{col!r} must be editable, not source"
-
-
-def test_provenance_check_allows_multiple_pps_per_block(tmp_path: Path) -> None:
-    """Several PP occurrences may share one parse_block_id (different
-    token spans); only the (block, span) occurrence identity is unique."""
-    validator = _load_validator()
-    base = _build_initial_tsv(tmp_path, validator)
-    header, body = _read_tsv(base)
-    assert len(body) >= 1
-    # Two rows in the same block with different spans.
-    row_a = dict(body[0])
-    row_b = dict(body[0])
-    row_b["datapoint_id"] = row_a["datapoint_id"] + "_dup"
-    row_b["de_token_start"] = str(int(row_a["de_token_start"]) + 5)
-    row_b["de_token_end"] = str(int(row_a["de_token_end"]) + 5)
-    tsv_multi = tmp_path / "multi.tsv"
-    _write_tsv(tsv_multi, header, [row_a, row_b])
-    violations, _ = validator.validate_tsv(tsv_multi, full_sample=True)
-    assert not [v for v in violations if "PROVENANCE" in v.rule or "DUPLICATE" in v.rule]
-
-    # Same block AND same span → duplicate occurrence identity.
-    tsv_dup = tmp_path / "dup.tsv"
-    _write_tsv(tsv_dup, header, [row_a, dict(row_a, datapoint_id=row_a["datapoint_id"] + "_x")])
-    violations, _ = validator.validate_tsv(tsv_dup, full_sample=True)
-    rules = {v.rule for v in violations}
-    assert "DUPLICATE_OCCURRENCE_IDENTITY" in rules
-    assert "DUPLICATE_PARSE_BLOCK_ID" not in rules

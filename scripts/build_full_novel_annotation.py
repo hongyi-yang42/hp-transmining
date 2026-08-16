@@ -190,8 +190,8 @@ def main(argv: list[str] | None = None) -> int:
         "note": (
             "Full-novel annotation master: every inventory-eligible occurrence "
             "with blank editable columns. German review (de_candidate_decision) "
-            "and EN/ZH annotation are downstream human work; the sampling "
-            "ledger (build_full_novel_sampling_ledger.py) joins back to this "
+            "and EN/ZH annotation are downstream human work; the eligible-pool "
+            "builder (build_eligible_pool.py) joins back to this "
             "file by datapoint_id."
         ),
     }

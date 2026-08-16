@@ -151,6 +151,12 @@ SOURCE_COLUMNS: tuple[str, ...] = (
     "de_prep_normalized",
     "de_head_lemma",
     "de_form",
+    # S2 structural metadata for the uncontracted determiner token
+    # (xpos/deprel as recorded by the extractor; "-" on contracted rows,
+    # which have no det token). Feeds the sampling path's parser-artifact
+    # gate — see docs/ANALYSIS_SAMPLE_DESIGN.md §3 S2.
+    "de_det_xpos",
+    "de_det_deprel",
     "author_resource_match",
     "minimal_pair_group",
     "en_sentence_ids",
@@ -175,6 +181,11 @@ EDITABLE_COLUMNS: tuple[str, ...] = (
     "de_candidate_decision",
     "de_exclusion_reason",
     "de_candidate_notes",
+    # German-review lemma correction. Single formal field: blank =
+    # accept the machine lemma (``de_head_lemma``); non-blank = use the
+    # human-corrected lemma. Blank is never read as confirmation of
+    # anything — it is the explicit "machine lemma stands" default.
+    "de_corrected_head_lemma",
     # English annotation: alignment QC first, then span/form/relation.
     "en_alignment_qc",
     "en_alignment_notes",
@@ -745,6 +756,8 @@ def build_candidates(
                     "de_prep_normalized": prep_normalized,
                     "de_head_lemma": head_lemma,
                     "de_form": de_form,
+                    "de_det_xpos": row.get("det_xpos", "-"),
+                    "de_det_deprel": row.get("det_deprel", "-"),
                     "author_resource_match": row.get("in_filter") == "Y",
                     "minimal_pair_group": minimal_pair_group_key(prep_normalized, head_lemma),
                     # EN
