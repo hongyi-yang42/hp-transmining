@@ -72,7 +72,7 @@ MIN_CHAPTER = 1
 MAX_CHAPTER = 17
 OK_STATUSES = frozenset({"ok", "zero_hits_ok"})
 
-ANNOTATION_MASTER_SCOPE = "full_novel_annotation_master"
+ANNOTATION_MASTER_SCOPE = "full_novel_machine_candidate_pool"
 
 MASTER_TSV_NAME = "full_novel_annotation_master.tsv"
 MASTER_SUMMARY_NAME = "full_novel_annotation_master.summary.json"

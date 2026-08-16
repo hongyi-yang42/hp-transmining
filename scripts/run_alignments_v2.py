@@ -1,5 +1,10 @@
-"""Run all 9 chapter-pair alignments on cache v2, write per-pair manifests,
+"""Run chapter-pair alignments on cache v2, write per-pair manifests,
 and run cross-pair verifications.
+
+By default this covers the original Ch.1-3 pilot (9 pairs). Pass
+``--chapters 4 5 ... 17`` (or the full ``1 ... 17`` for the whole novel,
+51 pairs) to extend coverage — every requested chapter must already have
+segmented output for all three languages.
 
 Outputs (all gitignored under ``data/derived/alignment_v2/``):
   * ``hp1_{src}_{tgt}_ch{NN}.jsonl`` — the alignment records (also copied to
@@ -15,6 +20,8 @@ the source novels (only the input/output file names and aggregate metrics).
 
 Usage:
     uv run python scripts/run_alignments_v2.py [--force-recompute]
+    uv run python scripts/run_alignments_v2.py --chapters 1 2 3
+    uv run python scripts/run_alignments_v2.py --chapters $(seq 1 17)
 """
 
 from __future__ import annotations
@@ -38,9 +45,24 @@ SEGMENTED_DIR = Path("data/segmented")
 ALIGNED_DIR = Path("data/aligned")
 MANIFEST_DIR = Path("data/derived/alignment_v2")
 EMBED_DIR = Path("data/embeddings")
-CHAPTERS = (1, 2, 3)
+DEFAULT_CHAPTERS = (1, 2, 3)
+MIN_CHAPTER = 1
+MAX_CHAPTER = 17
 PAIRS = (("de", "en"), ("de", "zh"), ("en", "zh"))
 MODEL_NAME = "intfloat/multilingual-e5-base"
+
+
+def validate_chapters(values: list[int]) -> tuple[tuple[int, ...], str | None]:
+    """Normalise and range-check a --chapters list.
+
+    Returns ``(chapters, None)`` or ``((), error_message)``. Kept pure for
+    tests. Duplicate values collapse; order is normalised ascending."""
+    if not values:
+        return (), "no chapters requested"
+    bad = [c for c in values if not MIN_CHAPTER <= c <= MAX_CHAPTER]
+    if bad:
+        return (), f"chapters must be within {MIN_CHAPTER}..{MAX_CHAPTER}: {sorted(set(bad))}"
+    return tuple(sorted(set(values))), None
 
 
 def _id_digest(segment_ids: list[str]) -> str:
@@ -238,14 +260,28 @@ def _cross_pair_uniqueness(chapter: int) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--force-recompute", action="store_true")
+    ap.add_argument(
+        "--chapters",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_CHAPTERS),
+        help=(f"chapters to align, {MIN_CHAPTER}..{MAX_CHAPTER} "
+              f"(default: {' '.join(map(str, DEFAULT_CHAPTERS))})"),
+    )
     args = ap.parse_args(argv)
+
+    chapters, err = validate_chapters(args.chapters)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
 
     MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
     ALIGNED_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"running {len(PAIRS) * len(CHAPTERS)} alignments on cache v2...")
+    print(f"running {len(PAIRS) * len(chapters)} alignments on cache v2 "
+          f"(ch{chapters[0]:02d}..ch{chapters[-1]:02d})...")
     manifests = []
-    for chapter in CHAPTERS:
+    for chapter in chapters:
         for src_lang, tgt_lang in PAIRS:
             m = run_one(src_lang, tgt_lang, chapter, args.force_recompute)
             manifests.append(m)
@@ -265,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     print("\ncross-pair confidence uniqueness:")
     overlaps = []
     all_unique = True
-    for chapter in CHAPTERS:
+    for chapter in chapters:
         chk = _cross_pair_uniqueness(chapter)
         overlaps.append(chk)
         for pair_key, info in chk["overlap_in_first_min_len"].items():

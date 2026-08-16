@@ -5,7 +5,10 @@ Rules (applied in order):
 2. Drop recurring header_patterns — but keep the first occurrence as chapter title.
 3. Drop page-number blocks (short digit-only text at top/bottom of page).
 4. Drop decorative glyphs (single-char blocks, asterisks separators).
-5. Separate footnotes (①②③-prefixed blocks) into _notes.jsonl.
+5. Separate footnotes into _notes.jsonl — ①②③-prefixed blocks (scanned
+   sources) and, when ``clean.footnote_spans`` is configured, superscript
+   digit markers + small-print note bodies identified via span font sizes
+   (born-digital text layers).
 6. Merge line breaks within paragraph; detect paragraph boundaries.
 7. Cross-page rejoin when previous page's last block lacks terminator.
 8. Conservative normalization (whitespace; no name/punctuation auto-correction).
@@ -58,6 +61,11 @@ _TOKEN_RE = re.compile(r"(\s+)")
 _WORD_TOKEN_RE = re.compile(r"[A-Za-zÄÖÜäöüß]+")
 _WORD_PUNCT_RE = re.compile(r"^([^\wäöüßÄÖÜ]*)([\wäöüßÄÖÜ]+?)([^\wäöüßÄÖÜ]*)$")
 
+
+def _collapse_ws(text: str) -> str:
+    """Remove all whitespace (incl. U+3000) for typography-insensitive compare."""
+    return re.sub(r"\s+", "", text)
+
 # A block is "indented" if its bbox x0 exceeds the page's body-text cluster
 # by a meaningful margin. PaddleOCR's body-text x0 has ~30px jitter on a
 # 300-DPI render, and real paragraph first-line indents sit ~90–110px right
@@ -80,12 +88,19 @@ def _strip_block_text(text: str) -> str:
     # (C0 control chars — \n, \t, etc. — are handled by the whitespace
     # normalize below; stripping them would concatenate adjacent words.)
     text = re.sub(r"[\x7f-\x9f]", "", text)
+    # Preserve a leading ideographic-space run (CJK first-line indent) as a
+    # single U+3000 prefix. Born-digital Chinese text layers mark paragraph
+    # starts typographically with U+3000 rather than (or in addition to) a
+    # bbox x0 shift; the paragraph assembler consumes the prefix as an
+    # indent signal and the final paragraph text strips it again.
+    m = re.match(r"　+", text)
+    prefix = m.group(0)[0] if m else ""
     # Normalize any whitespace run (incl. \n, \t, \xa0) to a single space.
     # Born-digital PDF text layers frequently separate words within a block
     # with \n; collapsing those to nothing (the old behavior) joined the
     # words into one concat artifact.
     text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return prefix + text
 
 
 def _build_inline_wordlist(blocks: list[OCRBlock]) -> set[str]:
@@ -184,6 +199,16 @@ def clean_blocks(
     # Sort by page, then block_idx for stable reading order
     in_range.sort(key=lambda b: (b.page, b.block_idx))
 
+    # 1a. Span-based footnote separation (text-layer sources with small-print
+    # notes). Runs before normalization so it sees raw span texts; the note
+    # blocks it emits are already normalized and go straight to the notes
+    # output, bypassing the per-block classification below.
+    footnotes: list[OCRBlock] = []
+    span_note_cfg = clean_cfg.get("footnote_spans") or None
+    if span_note_cfg:
+        in_range, span_notes = _separate_span_footnotes(in_range, span_note_cfg)
+        footnotes.extend(span_notes)
+
     # 1b. Drop blocks with implausible bbox (extreme x0 outlier — these are
     # almost always OCR false positives like stray Latin letters or digits
     # detected at the page margin). A block is an outlier if its x0 is more
@@ -213,7 +238,6 @@ def clean_blocks(
     # 2-5. Per-block classification
     seen_headers: set[str] = set()
     chapter_title: str | None = None
-    footnotes: list[OCRBlock] = []
     kept: list[OCRBlock] = []
     for b in in_range:
         text = b.text  # already normalized (and optionally split) above
@@ -231,13 +255,14 @@ def clean_blocks(
 
         # Header strip — exact match, with a whitespace-insensitive fallback
         # so typography variants like "THE  BOY  WHO  LIVED" (double-spaced
-        # running header) and "C H A P T E R  O N E" (letter-spaced chapter
-        # title) still match their normal-space pattern.
+        # running header), "C H A P T E R  O N E" (letter-spaced chapter
+        # title), and a pattern written with U+3000 (第７章　分院帽) whose
+        # normalized text carries an ASCII space still match.
         matched_pat = next(
             (
                 pat
                 for pat in header_patterns
-                if text == pat or text.replace(" ", "") == pat.replace(" ", "")
+                if text == pat or _collapse_ws(text) == _collapse_ws(pat)
             ),
             None,
         )
@@ -374,16 +399,83 @@ def _indent_thresholds(blocks: list[OCRBlock]) -> dict[int, float]:
 
 
 def _is_indented(block: OCRBlock, threshold: float | None) -> bool:
-    """True iff this block's left edge exceeds the page's indent threshold.
+    """True iff this block starts a new paragraph by first-line indent.
 
-    Falls back to leading-whitespace detection when bbox is unavailable or
-    unusable (e.g. text-layer blocks with [0,0,0,0]).
+    A leading ideographic space (U+3000) is checked first — born-digital
+    Chinese text layers encode the first-line indent typographically, often
+    with a bbox x0 shift too small for the adaptive gap analysis to detect.
+    Falls back to the bbox threshold, then to leading-whitespace detection
+    when bbox is unavailable or unusable (e.g. blocks with [0,0,0,0]).
     """
+    if block.text.startswith("　"):
+        return True
     if threshold is not None and len(block.bbox) >= 4 and block.bbox[2] > block.bbox[0] > 0:
         return float(block.bbox[0]) > threshold
     # Whitespace fallback — works for English text layer where blocks carry
     # their leading spaces.
     return block.text.startswith("　　") or block.text.startswith("    ")
+
+
+# A digit-only span below the configured size is a footnote marker: either an
+# in-text reference (superscript digit inside a body line) or the leading
+# number of a note entry (digit followed by small-print note text).
+_MARKER_DIGIT_RE = re.compile(r"\d{1,2}")
+
+
+def _separate_span_footnotes(
+    blocks: list[OCRBlock], cfg: dict[str, Any]
+) -> tuple[list[OCRBlock], list[OCRBlock]]:
+    """Separate footnote markers and note bodies using span font-size metadata.
+
+    For born-digital text layers whose translator notes are typeset in small
+    print (e.g. calibre-converted ebooks): digit-only spans below
+    ``marker_max_size`` are footnote markers. A line that contains a marker
+    and whose remaining spans are all below ``note_max_size`` is a note
+    entry — its text (minus the marker digits) goes to the notes output. On
+    body lines the marker digits are simply removed. Small-print lines
+    *without* a marker stay in the body: embedded documents (letters, lists,
+    songs) share the small font, and deleting real text costs more than a
+    missed note (fail-open by design).
+
+    Returns ``(body_blocks, note_blocks)``. Blocks without span metadata
+    pass through untouched.
+    """
+    marker_max = float(cfg.get("marker_max_size", 0.0))
+    note_max = float(cfg.get("note_max_size", 0.0))
+    out_blocks: list[OCRBlock] = []
+    notes: list[OCRBlock] = []
+    note_serial = 0
+    for b in blocks:
+        if not b.lines:
+            out_blocks.append(b)
+            continue
+        body_parts: list[str] = []
+        for line in b.lines:
+            spans = line.spans
+            marker_idx = {
+                i
+                for i, s in enumerate(spans)
+                if s.size < marker_max and _MARKER_DIGIT_RE.fullmatch(s.text.strip())
+            }
+            if not marker_idx:
+                body_parts.append("".join(s.text for s in spans))
+                continue
+            rest = [s for i, s in enumerate(spans) if i not in marker_idx]
+            if rest and all(s.size < note_max for s in rest):
+                note_text = _strip_block_text("".join(s.text for s in rest)).strip("　 ").strip()
+                if note_text:
+                    notes.append(
+                        b.model_copy(
+                            update={"block_idx": 9000 + note_serial, "text": note_text}
+                        )
+                    )
+                    note_serial += 1
+            else:
+                body_parts.append("".join(s.text for s in rest))
+        new_text = "\n".join(body_parts)
+        if new_text.strip():
+            out_blocks.append(b.model_copy(update={"text": new_text}))
+    return out_blocks, notes
 
 
 def _assemble_paragraphs(

@@ -210,6 +210,65 @@ def test_outside_inventory_routes_correctly() -> None:
     assert r.sampling_status == "not_selected"
 
 
+def test_outside_inventory_wins_over_blank_german_decision() -> None:
+    """An outside-inventory row with a blank (unreviewed) German decision is
+    excluded directly — it must NOT be classified blocked_german_review,
+    because no review outcome could ever make it eligible."""
+    occs = [
+        _occ(
+            "u_um_blank",
+            chapter=1,
+            form="uncontracted",
+            canonical_prep="um",
+            machine_lemma="alpha",
+            decision="",
+            inventory_eligible=False,
+        )
+    ]
+    result = select_sample(occs)
+    r = result.ledger[0]
+    assert r.sampling_selected is False
+    assert r.sampling_reason == "outside_author_inventory"
+    assert r.sampling_status == "not_selected"
+
+
+def test_outside_inventory_wins_over_uncertain_german_decision() -> None:
+    occs = [
+        _occ(
+            "c_um_unc",
+            chapter=5,
+            form="contracted",
+            canonical_prep="um",
+            machine_lemma="alpha",
+            decision="uncertain",
+            inventory_eligible=False,
+        )
+    ]
+    result = select_sample(occs)
+    r = result.ledger[0]
+    assert r.sampling_reason == "outside_author_inventory"
+    assert r.sampling_status == "not_selected"
+
+
+def test_inventory_eligible_blank_decision_still_blocks() -> None:
+    """The reorder must not weaken the review gate itself: an eligible row
+    with a blank decision still blocks on German review."""
+    occs = [
+        _occ(
+            "u_blank_elig",
+            chapter=1,
+            form="uncontracted",
+            canonical_prep="in",
+            machine_lemma="alpha",
+            decision="",
+        )
+    ]
+    result = select_sample(occs)
+    r = result.ledger[0]
+    assert r.sampling_reason == "blocked_german_review"
+    assert r.sampling_status == "blocked"
+
+
 def test_missing_lemma_for_u_blocks() -> None:
     """A U row without any effective lemma cannot contribute to U's lemma
     set; block it under blocked_lemma_review."""

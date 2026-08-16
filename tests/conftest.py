@@ -58,6 +58,30 @@ def zh_config() -> dict:
 
 
 @pytest.fixture
+def zh_textlayer_config() -> dict:
+    """Config mirroring the born-digital ZH ebook source (pymupdf engine,
+    span-based footnote separation, U+3000 paragraph indents)."""
+    return {
+        "book": "hp1",
+        "lang": "zh",
+        "chapter": {"number": 7, "start_page": 1, "end_page": 2},
+        "ocr": {"engine": "pymupdf", "lang": "zh"},
+        "clean": {
+            "header_patterns": ["第７章　分院帽"],
+            "remove_page_numbers": True,
+            "footnote_spans": {"marker_max_size": 7.0, "note_max_size": 9.0},
+            "merge_line_breaks": True,
+            "paragraph_detection": {"indent_threshold": 2, "dialogue_markers": ["“", "”"]},
+        },
+        "segment": {
+            "lang": "zh",
+            "split_on": ["。", "！", "？", "；"],
+            "preserve_ellipsis": True,
+        },
+    }
+
+
+@pytest.fixture
 def de_config() -> dict:
     return {
         "book": "hp1",

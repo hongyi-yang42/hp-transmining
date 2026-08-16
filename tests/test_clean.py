@@ -358,3 +358,136 @@ def test_concat_split_preserves_real_compounds(de_config) -> None:
     result = clean_blocks(blocks, cfg)
     text = " ".join(s.text for s in result.sentences)
     assert "Apfelbaum" in text  # not split into "Apfel baum"
+
+
+# --- Span-based footnote separation (born-digital text layers) -------------
+
+
+def _tl_blk(page: int, idx: int, lines_spec: list[list[tuple[str, float]]]) -> OCRBlock:
+    """Build a text-layer block from (text, size) span specs, mirroring the
+    pymupdf engine's output (text == '\\n'.join of line span texts)."""
+    from hp_corpus.schema import OCRLine, OCRSpan
+
+    lines = [OCRLine(spans=[OCRSpan(text=t, size=sz) for t, sz in ln]) for ln in lines_spec]
+    text = "\n".join("".join(t for t, _ in ln) for ln in lines_spec)
+    return OCRBlock(
+        page=page,
+        block_idx=idx,
+        text=text,
+        bbox=[0.0, 0.0, 100.0, 20.0],
+        confidence=1.0,
+        engine="pymupdf",
+        lines=lines,
+    )
+
+
+def test_span_footnotes_separate_note_entries(zh_textlayer_config) -> None:
+    """A small-print line starting with a marker digit is a note entry: its
+    text goes to _notes output and disappears from the body."""
+    cfg = zh_textlayer_config
+    blocks = [
+        _tl_blk(1, 0, [[("　第一段落正文内容甲乙。", 10.8), ("继续第二句。", 10.8)]]),
+        _tl_blk(1, 1, [[("1", 6.6), ("译注说明文字丙丁戊。", 7.8)]]),
+        _tl_blk(1, 2, [[("2", 6.6), ("第二条译注文字己庚。", 7.8)]]),
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert len(result.footnotes) == 2
+    assert all("译注" in n.text for n in result.footnotes)
+    assert all(not n.text[0].isdigit() for n in result.footnotes)
+    body = " ".join(s.text for s in result.sentences)
+    assert "译注" not in body
+    assert "第一段落" in body
+
+
+def test_span_footnotes_strip_inline_reference_markers(zh_textlayer_config) -> None:
+    """A superscript digit inside a body-size line is an in-text reference:
+    drop the digit, keep everything else, and emit no note."""
+    cfg = zh_textlayer_config
+    blocks = [
+        _tl_blk(1, 0, [[("句子前半内容", 10.8), ("1", 6.6), ("，句子后半内容。", 10.8)]]),
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert len(result.footnotes) == 0
+    assert len(result.sentences) == 1
+    assert result.sentences[0].text == "句子前半内容，句子后半内容。"
+
+
+def test_span_small_print_without_marker_stays_in_body(zh_textlayer_config) -> None:
+    """Small-print lines with no marker digit are embedded documents
+    (letters/lists), not notes — they must stay in the body."""
+    cfg = zh_textlayer_config
+    blocks = [
+        _tl_blk(1, 0, [[("　正文段落内容一。", 10.8)]]),
+        _tl_blk(1, 1, [[("嵌入文件的小字内容。", 7.8)]]),
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert len(result.footnotes) == 0
+    body = " ".join(s.text for s in result.sentences)
+    assert "嵌入文件" in body
+
+
+def test_span_footnotes_inert_without_config(zh_config) -> None:
+    """Without clean.footnote_spans, marker digits pass through untouched
+    (backward compatibility for scanned sources)."""
+    blocks = [
+        _tl_blk(1, 0, [[("句子前半", 10.8), ("1", 6.6), ("，句子后半。", 10.8)]]),
+    ]
+    result = clean_blocks(blocks, zh_config)
+    assert len(result.footnotes) == 0
+    assert "1" in result.sentences[0].text
+
+
+def test_span_footnotes_lone_marker_line_dropped(zh_textlayer_config) -> None:
+    """A line that is only a marker digit contributes nothing."""
+    cfg = zh_textlayer_config
+    blocks = [
+        _tl_blk(1, 0, [[("　正文段落内容。", 10.8)]]),
+        _tl_blk(1, 1, [[("3", 6.6)]]),
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert len(result.footnotes) == 0
+    assert len(result.sentences) == 1
+    assert result.sentences[0].text == "正文段落内容。"
+
+
+def test_span_footnotes_blocks_without_metadata_pass_through(zh_textlayer_config) -> None:
+    """PaddleOCR-style blocks (no span metadata) are untouched even when
+    footnote_spans is configured — the span rules simply don't apply."""
+    cfg = zh_textlayer_config
+    blocks = [_blk(1, 0, "正文段落一号内容。"), _blk(1, 1, "正文段落二号内容。")]
+    result = clean_blocks(blocks, cfg)
+    assert len(result.footnotes) == 0
+    # No indent signal → ZH blocks merge into one running paragraph.
+    assert [s.text for s in result.sentences] == ["正文段落一号内容。正文段落二号内容。"]
+
+
+def test_leading_ideographic_space_splits_paragraphs(zh_textlayer_config) -> None:
+    """A leading U+3000 (CJK first-line indent) starts a new paragraph even
+    when the bbox x0 gives no usable indent signal; the prefix itself must
+    not leak into the cleaned text."""
+    cfg = zh_textlayer_config
+    blocks = [
+        _tl_blk(1, 0, [[("　缩进的第一段落。", 10.8)]]),
+        _tl_blk(1, 1, [[("同栏续行内容。", 10.8)]]),
+        _tl_blk(1, 2, [[("　缩进的第二段落。", 10.8)]]),
+    ]
+    result = clean_blocks(blocks, cfg)
+    texts = [s.text for s in result.sentences]
+    assert texts == ["缩进的第一段落。同栏续行内容。", "缩进的第二段落。"]
+
+
+def test_header_pattern_u3000_matches_normalized_text(zh_textlayer_config) -> None:
+    """A header pattern written with an internal U+3000 (第７章　分院帽) must
+    match the chapter heading after whitespace normalization has turned the
+    U+3000 into an ASCII space — the heading is recorded as chapter title and
+    kept out of the body."""
+    cfg = zh_textlayer_config
+    blocks = [
+        _tl_blk(1, 0, [[("第７章", 13.8), ("　", 13.8), ("分院帽", 13.8)]]),
+        _tl_blk(1, 1, [[("　正文第一段落内容。", 10.8)]]),
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert result.chapter_title == "第７章 分院帽"
+    body = " ".join(s.text for s in result.sentences)
+    assert "分院帽" not in body
+    assert "正文第一段落" in body

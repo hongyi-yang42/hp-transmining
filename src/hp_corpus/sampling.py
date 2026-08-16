@@ -188,9 +188,15 @@ def select_sample(
     for o in occ_list:
         eff = effective_lemma(o, use_reviewed_lemma=use_reviewed_lemma)
 
-        pre_reason = _reason_for_blocked_or_excluded(o)
-        if pre_reason is None and not o.inventory_eligible:
+        # Inventory membership is a property of the PP itself — no German
+        # review outcome can make an outside-inventory row eligible, so it
+        # must be classified first. Otherwise an unreviewed (blank decision)
+        # outside-inventory row lands in blocked_german_review and sends
+        # reviewers rows they never need to look at.
+        if not o.inventory_eligible:
             pre_reason = "outside_author_inventory"
+        else:
+            pre_reason = _reason_for_blocked_or_excluded(o)
         if pre_reason is not None:
             status = "blocked" if pre_reason.startswith("blocked") else "not_selected"
             preliminary.append((o, eff, pre_reason, status))
