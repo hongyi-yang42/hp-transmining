@@ -114,9 +114,10 @@ def _build_synth_repo(tmp_path: Path) -> dict[str, Path]:
 
 def _row(
     *,
-    datapoint_id: str = "dp_ch01_hp1_de_ch01_p0001_s001_t1-2",
+    datapoint_id: str | None = None,
     chapter: int = 1,
-    de_sentence_id: str = "hp1_de_ch01_p0001_s001",
+    de_source_segment_id: str = "hp1_de_ch01_p0001_s001",
+    de_parse_block_id: str | None = None,
     de_form: str = "contracted",
     de_token_start: int = 1,
     de_token_end: int = 2,
@@ -131,10 +132,20 @@ def _row(
     zh_alignment_confidence: str = "0.82",
     source_row_sha256: str = "deadbeef",
 ) -> dict[str, Any]:
+    """Build an input row for the context-pack builder. The parse block
+    defaults to the first block (``#b001``) of the source segment, and the
+    datapoint_id defaults to the migrated id embedding that block."""
+    if de_parse_block_id is None:
+        de_parse_block_id = f"{de_source_segment_id}#b001"
+    if datapoint_id is None:
+        datapoint_id = (
+            f"dp_ch{chapter:02d}_{de_parse_block_id}_t{de_token_start}-{de_token_end}"
+        )
     return {
         "datapoint_id": datapoint_id,
         "chapter": chapter,
-        "de_sentence_id": de_sentence_id,
+        "de_parse_block_id": de_parse_block_id,
+        "de_source_segment_id": de_source_segment_id,
         "de_form": de_form,
         "de_token_start": de_token_start,
         "de_token_end": de_token_end,
@@ -246,11 +257,11 @@ def test_cli_happy_path_two_rows(tmp_path: Path, capsys) -> None:
     _write_input_tsv(
         input_tsv,
         [
-            _row(de_sentence_id="hp1_de_ch01_p0001_s002",
+            _row(de_source_segment_id="hp1_de_ch01_p0001_s002",
                  en_sentence_ids=["hp1_en_ch01_p0001_s002"],
                  zh_sentence_ids=["hp1_zh_ch01_p0001_s002"]),
-            _row(datapoint_id="dp_ch01_hp1_de_ch01_p0001_s003_t1-2",
-                 de_sentence_id="hp1_de_ch01_p0001_s003",
+            _row(datapoint_id="dp_ch01_hp1_de_ch01_p0001_s003#b001_t1-2",
+                 de_source_segment_id="hp1_de_ch01_p0001_s003",
                  de_form="uncontracted",
                  en_sentence_ids=["hp1_en_ch01_p0001_s003"],
                  en_aligned_text="synth EN three",
@@ -331,7 +342,7 @@ def test_cli_malformed_de_sentence_id_exits_2(tmp_path: Path, capsys) -> None:
     out = tmp_path / "out.tsv"
     _write_input_tsv(
         input_tsv,
-        [_row(de_sentence_id="not-a-real-segment-id")],
+        [_row(de_source_segment_id="not-a-real-segment-id")],
     )
     rc = _run(
         builder,
@@ -348,6 +359,61 @@ def test_cli_malformed_de_sentence_id_exits_2(tmp_path: Path, capsys) -> None:
     assert "row=0" in captured.err
 
 
+def test_cli_malformed_de_parse_block_id_exits_2(tmp_path: Path, capsys) -> None:
+    """A de_parse_block_id without the #bNNN block marker must fail
+    closed — non-empty is not good enough."""
+    builder = _load_builder()
+    repo = _build_synth_repo(tmp_path)
+    input_tsv = tmp_path / "in.tsv"
+    out = tmp_path / "out.tsv"
+    _write_input_tsv(
+        input_tsv,
+        [_row(de_parse_block_id="hp1_de_ch01_p0001_s001")],
+    )
+    rc = _run(
+        builder,
+        [
+            "--input-tsv", str(input_tsv),
+            "--segmented-dir", str(repo["segmented_dir"]),
+            "--output", str(out),
+        ],
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "MALFORMED_DE_PARSE_BLOCK_ID" in captured.err
+    assert "row=0" in captured.err
+
+
+def test_cli_de_provenance_mismatch_exits_2(tmp_path: Path, capsys) -> None:
+    """A well-formed block id that extends a DIFFERENT segment than the
+    row's de_source_segment_id must fail closed (silent mis-join risk)."""
+    builder = _load_builder()
+    repo = _build_synth_repo(tmp_path)
+    input_tsv = tmp_path / "in.tsv"
+    out = tmp_path / "out.tsv"
+    _write_input_tsv(
+        input_tsv,
+        [
+            _row(
+                de_source_segment_id="hp1_de_ch01_p0001_s002",
+                de_parse_block_id="hp1_de_ch01_p0001_s003#b001",
+            )
+        ],
+    )
+    rc = _run(
+        builder,
+        [
+            "--input-tsv", str(input_tsv),
+            "--segmented-dir", str(repo["segmented_dir"]),
+            "--output", str(out),
+        ],
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "DE_PROVENANCE_MISMATCH" in captured.err
+    assert "row=0" in captured.err
+
+
 def test_cli_unresolved_segment_id_exits_2(tmp_path: Path, capsys) -> None:
     builder = _load_builder()
     repo = _build_synth_repo(tmp_path)
@@ -357,7 +423,7 @@ def test_cli_unresolved_segment_id_exits_2(tmp_path: Path, capsys) -> None:
         input_tsv,
         [
             _row(
-                de_sentence_id="hp1_de_ch01_p0001_s002",
+                de_source_segment_id="hp1_de_ch01_p0001_s002",
                 # EN id not present in synth JSONL (which has s001..s005)
                 # — but use a malformed-pattern id to be safe.
                 en_sentence_ids=["hp1_en_ch01_p9999_s999"],
@@ -419,7 +485,7 @@ def test_cli_context_size_two_fetches_two_sentences_each_side(
         input_tsv,
         [
             _row(
-                de_sentence_id="hp1_de_ch01_p0001_s003",
+                de_source_segment_id="hp1_de_ch01_p0001_s003",
                 en_sentence_ids=["hp1_en_ch01_p0001_s003"],
                 zh_sentence_ids=["hp1_zh_ch01_p0001_s003"],
             )
@@ -457,7 +523,7 @@ def test_cli_no_cross_chapter_context_at_end(tmp_path: Path, capsys) -> None:
         input_tsv,
         [
             _row(
-                de_sentence_id="hp1_de_ch01_p0001_s005",
+                de_source_segment_id="hp1_de_ch01_p0001_s005",
                 en_sentence_ids=["hp1_en_ch01_p0001_s005"],
                 zh_sentence_ids=["hp1_zh_ch01_p0001_s005"],
             )
@@ -494,7 +560,7 @@ def test_cli_multi_sentence_alignment_joined_correctly(
         input_tsv,
         [
             _row(
-                de_sentence_id="hp1_de_ch01_p0001_s002",
+                de_source_segment_id="hp1_de_ch01_p0001_s002",
                 en_sentence_ids=[
                     "hp1_en_ch01_p0001_s002",
                     "hp1_en_ch01_p0001_s003",

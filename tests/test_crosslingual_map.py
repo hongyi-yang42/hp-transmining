@@ -21,11 +21,13 @@ from hp_corpus.crosslingual_map import (
     Sentence,
     Token,
     extract_pps,
+    index_blocks_by_segment,
     parse_conllu,
     propose_for_sides,
     score_candidate,
     select_best,
 )
+from hp_corpus.provenance import MissingProvenanceError
 
 # --------------------------------------------------------------------- helpers
 
@@ -89,19 +91,22 @@ def test_parse_conllu_skips_mwt_range_lines(tmp_path: Path) -> None:
     """MWT range lines like ``5-6`` must not appear in the token tuple."""
     path = tmp_path / "syn.conllu"
     path.write_text(
-        "# sent_id = syn_001\n"
+        "# sent_id = syn_001#b001\n"
+        "# source_segment_id = syn_001\n"
         "# text = im Haus\n"
-        "1-2	im	_	_	_	_	_	_	_	_\n"
-        "1	in	in	ADP	APPR	_	2	case	_	_\n"
-        "2	Haus	Haus	NOUN	NN	_	0	root	_	_\n"
-        "3	.	.	PUNCT	.	_	2	punct	_	_\n"
+        "1-2\tim\t_\t_\t_\t_\t_\t_\t_\t_\n"
+        "1\tin\tin\tADP\tAPPR\t_\t2\tcase\t_\t_\n"
+        "2\tHaus\tHaus\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+        "3\t.\t.\tPUNCT\t.\t_\t2\tpunct\t_\t_\n"
         "\n",
         encoding="utf-8",
     )
     sents = parse_conllu(path)
-    assert set(sents) == {"syn_001"}
-    s = sents["syn_001"]
-    assert s.sent_id == "syn_001"
+    assert set(sents) == {"syn_001#b001"}
+    s = sents["syn_001#b001"]
+    assert s.sent_id == "syn_001#b001"
+    assert s.parse_block_id == "syn_001#b001"
+    assert s.source_segment_id == "syn_001"
     assert s.text == "im Haus"
     # Range line skipped — only single-token rows kept.
     assert tuple(t.token_id for t in s.tokens) == (1, 2, 3)
@@ -111,6 +116,93 @@ def test_parse_conllu_handles_blank_input(tmp_path: Path) -> None:
     path = tmp_path / "empty.conllu"
     path.write_text("", encoding="utf-8")
     assert parse_conllu(path) == {}
+
+
+def test_parse_conllu_fails_closed_on_unmigrated_input(tmp_path: Path) -> None:
+    """A raw segment id as sent_id (no #bNNN) must raise, not parse."""
+    path = tmp_path / "raw.conllu"
+    path.write_text(
+        "# sent_id = syn_001\n"
+        "# text = im Haus\n"
+        "1\tin\tin\tADP\tAPPR\t_\t2\tcase\t_\t_\n"
+        "2\tHaus\tHaus\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+        "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(MissingProvenanceError):
+        parse_conllu(path)
+
+
+def test_parse_conllu_multi_block_segment_returns_all_blocks(tmp_path: Path) -> None:
+    """One source segment the parser split into two blocks: parse_conllu
+    must return both, keyed by block id, both pointing at the segment."""
+    path = tmp_path / "multi.conllu"
+    path.write_text(
+        "# sent_id = syn_001#b001\n"
+        "# source_segment_id = syn_001\n"
+        "# text = in house\n"
+        "1\tin\tin\tADP\tIN\t_\t2\tcase\t_\t_\n"
+        "2\thouse\thouse\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+        "\n"
+        "# sent_id = syn_001#b002\n"
+        "# source_segment_id = syn_001\n"
+        "# text = on hill\n"
+        "1\ton\ton\tADP\tIN\t_\t2\tcase\t_\t_\n"
+        "2\thill\thill\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+        "\n"
+        "# sent_id = syn_002#b001\n"
+        "# source_segment_id = syn_002\n"
+        "# text = at bay\n"
+        "1\tat\tat\tADP\tIN\t_\t2\tcase\t_\t_\n"
+        "2\tbay\tbay\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+        "\n",
+        encoding="utf-8",
+    )
+    sents = parse_conllu(path)
+    assert set(sents) == {"syn_001#b001", "syn_001#b002", "syn_002#b001"}
+    assert all(s.source_segment_id for s in sents.values())
+
+
+def test_index_blocks_by_segment_keeps_document_order(tmp_path: Path) -> None:
+    """The alignment-level lookup: one segment id → its blocks, ordered."""
+    path = tmp_path / "multi.conllu"
+    path.write_text(
+        "# sent_id = syn_001#b001\n"
+        "# source_segment_id = syn_001\n"
+        "# text = in house\n"
+        "1\tin\tin\tADP\tIN\t_\t2\tcase\t_\t_\n"
+        "2\thouse\thouse\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+        "\n"
+        "# sent_id = syn_002#b001\n"
+        "# source_segment_id = syn_002\n"
+        "# text = at bay\n"
+        "1\tat\tat\tADP\tIN\t_\t2\tcase\t_\t_\n"
+        "2\tbay\tbay\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+        "\n"
+        "# sent_id = syn_001#b002\n"
+        "# source_segment_id = syn_001\n"
+        "# text = on hill\n"
+        "1\ton\ton\tADP\tIN\t_\t2\tcase\t_\t_\n"
+        "2\thill\thill\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+        "\n",
+        encoding="utf-8",
+    )
+    index = index_blocks_by_segment(parse_conllu(path))
+    assert set(index) == {"syn_001", "syn_002"}
+    # Document order within the segment — b001 before b002 even though a
+    # different segment's block sits between them in the file.
+    assert [s.parse_block_id for s in index["syn_001"]] == [
+        "syn_001#b001",
+        "syn_001#b002",
+    ]
+
+
+def test_index_blocks_by_segment_fails_closed_without_provenance() -> None:
+    """A directly constructed Sentence without source_segment_id must
+    raise rather than be silently dropped from the index."""
+    bare = Sentence(sent_id="syn_001#b001", text="x", tokens=())
+    with pytest.raises(MissingProvenanceError):
+        index_blocks_by_segment({bare.sent_id: bare})
 
 
 # --------------------------------------------------------------------- extract_pps

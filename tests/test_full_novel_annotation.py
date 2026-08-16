@@ -36,8 +36,9 @@ def _load_script():
 def _write_extraction_tsv(path: Path, rows: list[dict[str, object]] | None) -> None:
     """rows=None → header-only TSV (the zero_hits_ok shape)."""
     fields = [
-        "sentence_id", "prep", "det", "noun", "prep_token_id", "det_token_id",
-        "noun_token_id", "pp_token_start", "pp_token_end", "pp_surface", "in_filter",
+        "parse_block_id", "source_segment_id", "prep", "det", "noun",
+        "prep_token_id", "det_token_id", "noun_token_id", "pp_token_start",
+        "pp_token_end", "pp_surface", "in_filter",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
@@ -113,20 +114,23 @@ def _build_synth_repo(
 
     _write_extraction_tsv(
         extraction / "hp1_de_ch01_contracted.tsv",
-        [{"sentence_id": "hp1_de_ch01_p0001_s001", "prep": "im", "noun": "Haus",
+        [{"parse_block_id": "hp1_de_ch01_p0001_s001#b001",
+          "source_segment_id": "hp1_de_ch01_p0001_s001", "prep": "im", "noun": "Haus",
           "prep_token_id": "1", "noun_token_id": "2", "pp_token_start": "1",
           "pp_token_end": "2", "pp_surface": "im Haus", "in_filter": "Y"}],
     )
     _write_extraction_tsv(
         extraction / "hp1_de_ch01_uncontracted.tsv",
-        [{"sentence_id": "hp1_de_ch01_p0002_s001", "prep": "in", "det": "dem",
+        [{"parse_block_id": "hp1_de_ch01_p0002_s001#b001",
+          "source_segment_id": "hp1_de_ch01_p0002_s001", "prep": "in", "det": "dem",
           "noun": "Wald", "prep_token_id": "1", "det_token_id": "2",
           "noun_token_id": "3", "pp_token_start": "1", "pp_token_end": "3",
           "pp_surface": "in dem Wald", "in_filter": "Y"}],
     )
     _write_extraction_tsv(
         extraction / "hp1_de_ch02_contracted.tsv",
-        [{"sentence_id": "hp1_de_ch02_p0001_s001", "prep": "am", "noun": "Tag",
+        [{"parse_block_id": "hp1_de_ch02_p0001_s001#b001",
+          "source_segment_id": "hp1_de_ch02_p0001_s001", "prep": "am", "noun": "Tag",
           "prep_token_id": "1", "noun_token_id": "2", "pp_token_start": "1",
           "pp_token_end": "2", "pp_surface": "am Tag", "in_filter": "N"}],
     )

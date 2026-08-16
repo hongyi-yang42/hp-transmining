@@ -90,7 +90,12 @@ def main(argv: list[str] | None = None) -> int:
     # annotator when grouped by chapter and ordered by sentence, so re-sort.
     selected_sorted = sorted(
         selected,
-        key=lambda c: (int(c["chapter"]), str(c["de_sentence_id"]), int(c["de_token_start"])),
+        key=lambda c: (
+            int(c["chapter"]),
+            str(c["de_source_segment_id"]),
+            str(c["de_parse_block_id"]),
+            int(c["de_token_start"]),
+        ),
     )
     pilot_tsv = args.output_dir / "ch1_3_pilot_20.tsv"
     write_pilot_tsv(selected_sorted, pilot_tsv)

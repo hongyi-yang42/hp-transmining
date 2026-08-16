@@ -29,6 +29,7 @@ import json
 import re
 from pathlib import Path
 
+from hp_corpus.provenance import MalformedParseBlockIdError, split_parse_block_id
 from hp_corpus.schema import Segment
 
 # --------------------------------------------------------------------- constants
@@ -40,7 +41,8 @@ from hp_corpus.schema import Segment
 REQUIRED_INPUT_COLUMNS: tuple[str, ...] = (
     "datapoint_id",
     "chapter",
-    "de_sentence_id",
+    "de_parse_block_id",
+    "de_source_segment_id",
     "de_form",
     "de_token_start",
     "de_token_end",
@@ -64,7 +66,8 @@ OUTPUT_COLUMNS: tuple[str, ...] = (
     "datapoint_id",
     "chapter",
     "de_form",
-    "de_sentence_ids",
+    "de_parse_block_id",
+    "de_source_segment_id",
     "de_token_range",
     "de_text",
     "de_context_prev",
@@ -142,6 +145,18 @@ class MalformedIdError(ContextPackError):
     """A ``de_sentence_id`` does not match the canonical segment-id pattern."""
 
     rule = "MALFORMED_DE_SENTENCE_ID"
+
+
+class MalformedBlockIdError(ContextPackError):
+    """A ``de_parse_block_id`` is not of the form ``<segment_id>#bNNN``."""
+
+    rule = "MALFORMED_DE_PARSE_BLOCK_ID"
+
+
+class ProvenanceMismatchError(ContextPackError):
+    """``de_parse_block_id`` does not extend its ``de_source_segment_id``."""
+
+    rule = "DE_PROVENANCE_MISMATCH"
 
 
 class UnresolvedSegmentError(ContextPackError):
@@ -270,6 +285,26 @@ def assert_de_sentence_id_wellformed(
     """Raise :class:`MalformedIdError` if the id is not canonical."""
     if not SEGMENT_ID_RE.match(de_sentence_id):
         raise MalformedIdError(row=row, detail="")
+
+
+def assert_de_parse_block_provenance(
+    de_parse_block_id: str, de_source_segment_id: str, *, row: int | None
+) -> None:
+    """Fail closed on malformed or inconsistent block-level provenance.
+
+    Reuses the centralized parse-block-id grammar
+    (:func:`hp_corpus.provenance.split_parse_block_id`): the block id
+    must be a well-formed ``<segment_id>#bNNN`` whose segment part
+    equals the row's ``de_source_segment_id``. Checking that both cells
+    are merely non-empty is not enough — a block id pointing at a
+    different segment would silently mis-join the row.
+    """
+    try:
+        sid, _ = split_parse_block_id(de_parse_block_id)
+    except MalformedParseBlockIdError as e:
+        raise MalformedBlockIdError(row=row) from e
+    if sid != de_source_segment_id:
+        raise ProvenanceMismatchError(row=row)
 
 
 def assert_ids_resolved(

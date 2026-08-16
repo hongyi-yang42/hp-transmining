@@ -105,8 +105,10 @@ Effective-lemma priority:
 - Occurrence identity = (chapter, source_segment_id, **parse_block_id**,
   pp_token_start, pp_token_end). Same-key rows collapse to one; the
   machine pool has 0 exact coordinate collisions (§7.2). The
-  parse_block_id component requires the provenance migration in §7.2 —
-  a **hard gate** before annotator batches.
+  `parse_block_id` migration and its centralized fail-closed validation
+  are implemented (§7.2); verifying that the real `data/parsed/` files
+  are migrated and pass validation remains a **runtime hard gate**
+  before annotator batches.
 - Analysis unit = **occurrence** (token). Type = (form,
   canonical_prep, effective_lemma); type counts are always reported
   next to occurrence counts.
@@ -338,13 +340,26 @@ relative-pronoun contamination":
 
 ### 7.2 sent_id is not a unique key into the parsed files
 
-Structure: 6,279 CoNLL-U blocks share 5,042 distinct sent_ids (1,076
-duplicated; every chapter affected). Mechanism: a Segment can be split
-into several Stanza sentence blocks that all carry the Segment's
-sent_id; extracted-TSV coordinates are block-relative, so sentence_id
-alone does not identify the reviewing context.
+> **Status:** the numbers below are **pre-migration evidence**,
+> measured on the frozen machine corpus before the block-provenance
+> migration ran. The migration and its centralized fail-closed
+> validation are now implemented (`hp_corpus.provenance`: missing,
+> duplicate, or inconsistent provenance — including physical blocks
+> with token content but no `# sent_id` — refuse parsing, extraction,
+> and annotation-pack input). What remains is the **runtime hard
+> gate**: before any annotator batch is generated, the real
+> `data/parsed/` files must be verified migrated and passing that
+> validation — an operational precondition of the batch run, not
+> future code.
 
-Integrity checks on the machine pool (all aggregate):
+Structure (pre-migration): 6,279 DE CoNLL-U blocks shared 5,042
+distinct sent_ids (1,076 duplicated; every chapter affected).
+Mechanism: a Segment can be split into several Stanza sentence blocks
+that all carried the Segment's sent_id; extracted-TSV coordinates are
+block-relative, so sentence_id alone did not identify the reviewing
+context.
+
+Integrity checks on the pre-migration machine pool (all aggregate):
 
 | check | result |
 |---|---|
@@ -355,19 +370,24 @@ Integrity checks on the machine pool (all aggregate):
 | block-partition: blocks sharing a sent_id concatenate (whitespace-stripped) to the segment text | 1,076 / 1,076 pass |
 
 These are same-pipeline consistency checks, not independent proof, and
-they cannot protect a human reviewer who is pointed at "sentence_id X"
-and lands on the wrong block. Therefore:
-
-**Hard gate:** a migration to unique `parse_block_id` (plus stable
-`source_segment_id`) is **required before any annotator batch is
-generated** (§8).
+they could not protect a human reviewer who was pointed at "sentence_id
+X" and landed on the wrong block — which is why the block-provenance
+migration was the hard gate this evidence demanded.
 
 ### 7.3 The extracted TSV noun column carries the lemma, not the surface
 
 form (e.g. `Riese` for `Riesen`). Harmless for sampling (S4 matches on
 lemma) but relevant when eyeballing rows and when building fingerprints.
 
-## 8. Implementation requirements (future code changes)
+## 8. Remaining requirements
+
+Already implemented and no longer future work: the
+`parse_block_id` / `source_segment_id` provenance migration with its
+centralized fail-closed validation (§7.2) — including block-level
+identity in extraction output, the annotation master, joins, and
+annotation-pack input validation.
+
+Still outstanding:
 
 1. **S4 paper-literal selection** — prep+noun C_late matching in
    `src/hp_corpus/sampling.py` + CLI, replacing the noun-only rule; the
@@ -378,16 +398,18 @@ lemma) but relevant when eyeballing rows and when building fingerprints.
    support closure, reserve ladder: same code path, with
    synthetic-fixture tests covering the selection rule (prep+noun vs
    noun-only), the group floor, and the support-ladder/witness logic.
-3. **`parse_block_id` / `source_segment_id` migration** — hard gate
-   before annotator batches.
+3. **Runtime verification of the provenance gate** — confirm the real
+   `data/parsed/` files are migrated and pass validation at batch time
+   (§7.2).
 4. German review and EN/ZH annotation tooling build on the above; no
    batches exist today.
 
 ## 9. Replication-claim boundary
 
 Current status: a **transparent paper-literal re-implementation
-design**. No replication claim is earned yet — implementation, German
-review, and EN/ZH annotation are all outstanding.
+design**. No replication claim is earned yet — S4 selection, the
+Mode-C sampler, German review, EN/ZH annotation, and the downstream
+analysis are all outstanding.
 
 | claim | status |
 |---|---|

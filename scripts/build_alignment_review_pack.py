@@ -2,7 +2,7 @@
 
 For each of the 20 pilot datapoints, emits one row containing:
   * datapoint_id, chapter, de_form
-  * de_sentence_ids, de_text, de_token_range
+  * de_parse_block_id, de_source_segment_id, de_token_range, de_text
   * en_sentence_ids, en_text, en_cardinality, en_confidence
   * zh_sentence_ids, zh_text, zh_cardinality, zh_confidence
   * one preceding + one following context sentence per language (de/en/zh)
@@ -122,7 +122,8 @@ def main(argv: list[str] | None = None) -> int:
         "datapoint_id",
         "chapter",
         "de_form",
-        "de_sentence_ids",
+        "de_parse_block_id",
+        "de_source_segment_id",
         "de_token_range",
         "de_text",
         "de_context_prev",
@@ -154,9 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         w.writerow(headers)
         for r in pilot_rows:
             ch = int(r["chapter"])
-            # de_sentence_id is singular in the pilot TSV (one DE sentence per
-            # PP datapoint). en/zh_sentence_ids are JSON lists.
-            de_ids = [r["de_sentence_id"]] if r.get("de_sentence_id") else []
+            # de_source_segment_id is singular in the master TSV (one DE
+            # segment per PP datapoint). en/zh_sentence_ids are JSON lists.
+            de_ids = [r["de_source_segment_id"]] if r.get("de_source_segment_id") else []
             en_ids = json.loads(r["en_sentence_ids"]) if r.get("en_sentence_ids") else []
             zh_ids = json.loads(r["zh_sentence_ids"]) if r.get("zh_sentence_ids") else []
 
@@ -172,7 +173,8 @@ def main(argv: list[str] | None = None) -> int:
                 r["datapoint_id"],
                 r["chapter"],
                 r["de_form"],
-                r["de_sentence_id"],
+                r["de_parse_block_id"],
+                r["de_source_segment_id"],
                 f"{r['de_token_start']}-{r['de_token_end']}",
                 r.get("de_sentence_text", ""),
                 de_prev,

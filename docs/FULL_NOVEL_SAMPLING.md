@@ -7,9 +7,11 @@ Bremmers reproduction.
 Two scripts are involved:
 
   * `scripts/run_full_novel_german_extraction.py` — paper-faithful PP
-    extraction with a per-chapter manifest. Supersedes
-    `run_paper_extractor.py` for full-novel work; the older script
-    remains for Ch.1–3.
+    extraction with a per-chapter manifest. The single implementation
+    of the paper's extractor (`src/hp_corpus/german_extraction.py`);
+    emits `parse_block_id` + `source_segment_id` per row. The older
+    `run_paper_extractor.py` is a deprecated thin wrapper that
+    delegates here (kept only for invocation compatibility).
   * `scripts/build_full_novel_sampling_ledger.py` — applies the U /
     C_early / C_late sampling rule and writes the ledger + target TSVs.
 

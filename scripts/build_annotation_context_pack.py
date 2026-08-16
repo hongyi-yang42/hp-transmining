@@ -19,7 +19,10 @@ echo it. Only aggregate counts are printed:
 Failure modes (all exit 2, all messages aggregate-only):
 
     MISSING_REQUIRED_COLUMN   — input header missing a required column
-    MALFORMED_DE_SENTENCE_ID  — de_sentence_id not canonical
+    MALFORMED_DE_SENTENCE_ID  — de_source_segment_id not canonical
+    MALFORMED_DE_PARSE_BLOCK_ID — de_parse_block_id not `<segment>#bNNN`
+    DE_PROVENANCE_MISMATCH    — de_parse_block_id does not extend
+                                de_source_segment_id
     UNRESOLVED_SEGMENT_ID     — referenced segment id not in JSONL
     MALFORMED_SENTENCE_IDS_JSON — en/zh_sentence_ids cell not a JSON list
 
@@ -49,6 +52,7 @@ from hp_corpus.annotation_workflow import (  # noqa: E402
     OUTPUT_COLUMNS,
     REQUIRED_INPUT_COLUMNS,
     ContextPackError,
+    assert_de_parse_block_provenance,
     assert_de_sentence_id_wellformed,
     assert_ids_resolved,
     context_around,
@@ -135,10 +139,14 @@ def main(argv: list[str] | None = None) -> int:
     for idx, r in enumerate(rows):
         try:
             ch = int(r["chapter"])
-            de_sid = r["de_sentence_id"]
+            de_sid = r["de_source_segment_id"]
+            de_block = r["de_parse_block_id"]
 
-            # 1) DE id must be canonical before we look anything up.
+            # 1) DE ids must be canonical before we look anything up.
             assert_de_sentence_id_wellformed(de_sid, row=idx)
+            # The block id must be well-formed and extend the row's
+            # source segment (fail closed on malformed/mismatched).
+            assert_de_parse_block_provenance(de_block, de_sid, row=idx)
 
             # 2) Decode en/zh sentence_ids lists.
             en_ids = parse_sentence_ids(
@@ -176,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
                 r["datapoint_id"],
                 r["chapter"],
                 r["de_form"],
+                de_block,
                 de_sid,
                 f"{r['de_token_start']}-{r['de_token_end']}",
                 de_text_cell,

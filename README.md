@@ -21,8 +21,8 @@ hp-corpus parse     --config config/hp1_*.yaml  # → CoNLL-U (Stanza)
 hp-corpus align     --src … --tgt … --out-name … # cross-language e5-base + DP alignment
 
 # Extraction & cross-lingual mapping (post-alignment, see scripts/):
-uv run python scripts/run_paper_extractor.py            # paper-faithful PP extraction on DE CoNLL-U
-uv run python scripts/run_alignments_v2.py --chapters 4 … 17  # chapter-pair alignments + manifests (default 1 2 3)
+uv run python scripts/run_full_novel_german_extraction.py --chapters 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17  # paper-faithful PP extraction on DE CoNLL-U (per-row parse_block_id + source_segment_id)
+uv run python scripts/run_alignments_v2.py --chapters 4 5 6 7 8 9 10 11 12 13 14 15 16 17  # chapter-pair alignments + manifests (default 1 2 3)
 uv run python scripts/build_full_novel_annotation.py    # full-novel machine candidate pool (human columns blank)
 # → human review/annotation fills data/derived/step4/*.tsv per docs/STEP4_ANNOTATION.md
 ```

@@ -1,10 +1,11 @@
 """Paper-faithful German PP extraction with chapter manifests.
 
-This module provides the full-novel-safe successor to
-``scripts/run_paper_extractor.py``. The algorithm in :func:`extract_chapter`
-is line-for-line identical to ``run_paper_extractor.extract`` (the
-paper's ``time-in-translation/conll-extractor`` logic verbatim). What is
-new here:
+This module is the **single implementation** of the paper's
+``time-in-translation/conll-extractor`` logic (verbatim algorithm in
+:func:`extract_chapter`). The original standalone Ch.1–3 script
+``scripts/run_paper_extractor.py`` was replaced by it and is now a
+deprecated thin wrapper around ``run_full_novel_german_extraction.py``.
+What this module provides over the legacy script:
 
 * **Path bug fix** — input/output paths use ``f"hp1_de_ch{chapter:02d}_..."``
   zero-padding so chapters 10–17 produce the correct filename
@@ -43,6 +44,15 @@ import hashlib
 from pathlib import Path
 
 import pyconll
+
+from hp_corpus.provenance import (
+    DuplicateParseBlockIdError,
+    InconsistentProvenanceError,
+    MissingProvenanceError,
+    scan_blocks,
+    split_parse_block_id,
+    validate_blocks,
+)
 
 # ---------------------------------------------------------------------------
 # Vendor filter-list handles.
@@ -92,7 +102,7 @@ _try_load_vendor_lists()
 
 
 # ---------------------------------------------------------------------------
-# Constants — must match run_paper_extractor.py.
+# Constants.
 # ---------------------------------------------------------------------------
 
 EXTRACTOR_VERSION = "paper-faithful-v1"
@@ -101,7 +111,8 @@ POS_ARTICLE = "ART"
 POS_NOUN = "NN"
 
 TSV_FIELDS = [
-    "sentence_id",
+    "parse_block_id",
+    "source_segment_id",
     "prep",
     "det",
     "noun",
@@ -119,6 +130,9 @@ RULE_MISSING = "MISSING_PARSED_INPUT"
 RULE_EMPTY = "EMPTY_PARSED_INPUT"
 RULE_FAILED = "EXTRACTION_FAILED"
 RULE_CHAPTER_RANGE = "CHAPTER_OUT_OF_RANGE"
+RULE_PROVENANCE_MISSING = "MISSING_PARSE_PROVENANCE"
+RULE_PROVENANCE_DUP = "DUPLICATE_PARSE_BLOCK_ID"
+RULE_PROVENANCE_INCONSISTENT = "INCONSISTENT_PARSE_PROVENANCE"
 
 VALID_STATUSES = {
     "ok",
@@ -148,6 +162,27 @@ class EmptyParsedInputError(GermanExtractionError):
 
 class ExtractionFailedError(GermanExtractionError):
     """Raised when pyconll or the extraction algorithm raises."""
+
+
+class ProvenanceMissingError(GermanExtractionError):
+    """Raised when a parsed block lacks block-level provenance.
+
+    A block's ``sent_id`` must be a ``<segment_id>#bNNN`` parse_block_id
+    carrying a matching ``# source_segment_id`` comment. A raw segment
+    id as sent_id means the provenance migration has not run — refuse
+    to extract rather than emit rows whose block identity is ambiguous.
+    """
+
+
+class ProvenanceDuplicateError(GermanExtractionError):
+    """Raised when the same parse_block_id appears twice in one file."""
+
+
+class ProvenanceInconsistentError(GermanExtractionError):
+    """Raised when block provenance is present but self-inconsistent:
+    sent_id does not extend its ``# source_segment_id``, or the block
+    ordinal breaks the within-segment document order (ordinal 0, gaps,
+    out-of-order numbering)."""
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +235,29 @@ def _count_sentences(parsed_path: Path) -> int:
     return n
 
 
+def _provenance_counts(parsed_path: Path) -> dict[str, int]:
+    """Lenient provenance aggregates for the manifest (never raises).
+
+    ``blocks_missing_provenance`` > 0 means the file has not been
+    migrated (or is inconsistent); :func:`extract_chapter` is the
+    fail-closed gate, the manifest just records the state.
+    """
+    with open(parsed_path, encoding="utf-8") as f:
+        blocks = scan_blocks(f)
+    migrated = [b for b in blocks if b.migrated and b.source_segment_id]
+    distinct = len({b.sent_id for b in migrated})
+    per_segment: dict[str, int] = {}
+    for b in migrated:
+        sid, _ = split_parse_block_id(b.sent_id)
+        per_segment[sid] = per_segment.get(sid, 0) + 1
+    return {
+        "blocks_total": len(blocks),
+        "distinct_parse_block_ids": distinct,
+        "multi_block_segments": sum(1 for c in per_segment.values() if c > 1),
+        "blocks_missing_provenance": len(blocks) - len(migrated),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Core extraction API.
 # ---------------------------------------------------------------------------
@@ -234,6 +292,21 @@ def extract_chapter(parsed_path: Path, contracted: bool) -> list[dict]:
     if not parsed_path.exists():
         raise MissingParsedInputError(str(parsed_path))
 
+    # Fail-closed block provenance via the single centralized validator
+    # (hp_corpus.provenance): missing provenance, duplicate block ids,
+    # prefix mismatch, ordinal 0, ordinal gaps and invalid document order
+    # all refuse extraction before any row is emitted. sent_id alone is
+    # never trusted as a block key.
+    try:
+        with open(parsed_path, encoding="utf-8") as f:
+            validate_blocks(scan_blocks(f))
+    except MissingProvenanceError as exc:
+        raise ProvenanceMissingError(str(exc)) from exc
+    except DuplicateParseBlockIdError as exc:
+        raise ProvenanceDuplicateError(str(exc)) from exc
+    except InconsistentProvenanceError as exc:
+        raise ProvenanceInconsistentError(str(exc)) from exc
+
     # Read the module-global handles at call time so tests can monkeypatch.
     forms = CONTRACTED if contracted else PREPOSITIONS
     needs_determiner = not contracted
@@ -249,6 +322,9 @@ def extract_chapter(parsed_path: Path, contracted: bool) -> list[dict]:
     try:
         for sentence in sentences:
             sentence_seen = True
+
+            pid = sentence.id or ""
+            source_segment_id = sentence.meta_value("source_segment_id")
 
             ordered_ids: list[str] = []
             id_to_form: dict[str, str] = {}
@@ -300,7 +376,8 @@ def extract_chapter(parsed_path: Path, contracted: bool) -> list[dict]:
                             "prep": current_token,
                             "det": current_det,
                             "noun": token.lemma,
-                            "sentence_id": sentence.id,
+                            "parse_block_id": pid,
+                            "source_segment_id": source_segment_id,
                             "prep_token_id": current_prep_id,
                             "det_token_id": current_det_id,
                             "noun_token_id": token.id,
@@ -368,16 +445,19 @@ def chapter_manifest(
     sha: str | None = None
     size: int | None = None
     sent_count: int | None = None
+    provenance: dict | None = None
 
     if parsed_path.exists():
         try:
             sha = _parsed_path_sha256(parsed_path)
             size = parsed_path.stat().st_size
             sent_count = _count_sentences(parsed_path)
+            provenance = _provenance_counts(parsed_path)
         except OSError:
             sha = None
             size = None
             sent_count = None
+            provenance = None
 
     row_count = len(hits) if hits is not None else 0
 
@@ -388,6 +468,16 @@ def chapter_manifest(
         "parsed_path_sha256": sha,
         "parsed_path_size": size,
         "parsed_path_sentence_count": sent_count,
+        "parse_blocks": provenance["blocks_total"] if provenance else None,
+        "unique_parse_block_ids": provenance["distinct_parse_block_ids"]
+        if provenance
+        else None,
+        "multi_block_segments": provenance["multi_block_segments"]
+        if provenance
+        else None,
+        "blocks_missing_provenance": provenance["blocks_missing_provenance"]
+        if provenance
+        else None,
         "extractor_version": EXTRACTOR_VERSION,
         "status": status,
         "row_count": row_count,
@@ -405,7 +495,7 @@ def write_chapter_tsv(path: Path, hits: list[dict], matched: list[dict]) -> Path
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     matched_keys = {
-        (h["sentence_id"], h["prep"], h["noun"], h["pp_token_start"], h["pp_token_end"])
+        (h["parse_block_id"], h["prep"], h["noun"], h["pp_token_start"], h["pp_token_end"])
         for h in matched
     }
     with open(path, "w", encoding="utf-8", newline="") as f:
@@ -413,7 +503,7 @@ def write_chapter_tsv(path: Path, hits: list[dict], matched: list[dict]) -> Path
         w.writeheader()
         for h in hits:
             key = (
-                h["sentence_id"],
+                h["parse_block_id"],
                 h["prep"],
                 h["noun"],
                 h["pp_token_start"],
@@ -452,6 +542,10 @@ __all__ = [
     "MissingParsedInputError",
     "EmptyParsedInputError",
     "ExtractionFailedError",
+    "ProvenanceMissingError",
+    "ProvenanceDuplicateError",
+    "ProvenanceInconsistentError",
+    "RULE_PROVENANCE_INCONSISTENT",
     "extract_chapter",
     "validate_against_filters",
     "chapter_manifest",

@@ -37,10 +37,14 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "run_full_novel_german_extraction.py"
 # ---------------------------------------------------------------------------
 # Token columns: id, form, lemma, upos, xpos, head, deprel, deps, misc.
 # The 10-field form is what Stanza emits; pyconll parses it cleanly.
+# Every block carries migrated provenance: sent_id is a <segment_id>#bNNN
+# parse_block_id and the original segment id lives in the
+# # source_segment_id comment.
 
 # Contracted PP: "im Haus" — "im" ∈ CONTRACTED, "Haus" ∈ FILTER_CONTRACTED_123["im"].
 SYNTH_CONTRACTED_HIT = """\
-# sent_id = synth_contracted
+# sent_id = synth_contracted#b001
+# source_segment_id = synth_contracted
 # text = im Haus
 1\tim\tim\tADP\tAPPR\t_\t2\tcase\t_\t_
 2\tHaus\tHaus\tNOUN\tNN\t_\t0\troot\t_\t_
@@ -49,7 +53,8 @@ SYNTH_CONTRACTED_HIT = """\
 # Uncontracted PP: "in dem Wald" — "in" ∈ PREPOSITIONS, "dem" ∈ DETERMINERS,
 # "Wald" ∈ FILTER_PP["in"].
 SYNTH_UNCONTRACTED_HIT = """\
-# sent_id = synth_uncontracted
+# sent_id = synth_uncontracted#b001
+# source_segment_id = synth_uncontracted
 # text = in dem Wald
 1\tin\tin\tADP\tAPPR\t_\t3\tcase\t_\t_
 2\tdem\tder\tDET\tART\t_\t3\tdet\t_\t_
@@ -58,19 +63,22 @@ SYNTH_UNCONTRACTED_HIT = """\
 
 # Sentence with no CONTRACTED/PREPOSITIONS forms → zero hits.
 SYNTH_NO_HITS = """\
-# sent_id = synth_no_hits
+# sent_id = synth_no_hits#b001
+# source_segment_id = synth_no_hits
 # text = rien
 1\trien\trien\tNOUN\tNN\t_\t0\troot\t_\t_
 """
 
 # A real "two-form" file: one contracted + one uncontracted sentence.
 SYNTH_BOTH = (
-    "# sent_id = synth_c\n"
+    "# sent_id = synth_c#b001\n"
+    "# source_segment_id = synth_c\n"
     "# text = im Haus\n"
     "1\tim\tim\tADP\tAPPR\t_\t2\tcase\t_\t_\n"
     "2\tHaus\tHaus\tNOUN\tNN\t_\t0\troot\t_\t_\n"
     "\n"
-    "# sent_id = synth_u\n"
+    "# sent_id = synth_u#b001\n"
+    "# source_segment_id = synth_u\n"
     "# text = in dem Wald\n"
     "1\tin\tin\tADP\tAPPR\t_\t3\tcase\t_\t_\n"
     "2\tdem\tder\tDET\tART\t_\t3\tdet\t_\t_\n"
@@ -80,7 +88,8 @@ SYNTH_BOTH = (
 # Sentences with prep forms that aren't in any FILTER — exercises the
 # "in_filter exists but doesn't gate row count" rule.
 SYNTH_OUT_OF_FILTER = """\
-# sent_id = synth_outside
+# sent_id = synth_outside#b001
+# source_segment_id = synth_outside
 # text = im Berg
 1\tim\tim\tADP\tAPPR\t_\t2\tcase\t_\t_
 2\tBerg\tBerg\tNOUN\tNN\t_\t0\troot\t_\t_
@@ -377,6 +386,36 @@ def test_happy_path_with_hits(tmp_path, cli):
     assert statuses["contracted"] == "ok"
     assert statuses["uncontracted"] == "ok"
     assert all(m["row_count"] == 1 for m in manifest)
+
+
+def test_documented_path_emits_both_provenance_columns(tmp_path, cli):
+    """The README-documented extraction command must emit rows carrying
+    BOTH ``parse_block_id`` and ``source_segment_id`` — the two-level
+    provenance downstream (Step 4 master, cross-lingual mapping) joins on."""
+    parsed_dir = tmp_path / "parsed"
+    _write_parsed(parsed_dir, 1, SYNTH_BOTH)
+    out_dir = tmp_path / "out"
+
+    rc = cli.main(
+        [
+            "--chapters",
+            "1",
+            "--parsed-dir",
+            str(parsed_dir),
+            "--output-dir",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+
+    for name, block, segment in (
+        ("hp1_de_ch01_contracted.tsv", "synth_c#b001", "synth_c"),
+        ("hp1_de_ch01_uncontracted.tsv", "synth_u#b001", "synth_u"),
+    ):
+        rows = _read_tsv(out_dir / name)
+        assert len(rows) == 1
+        assert rows[0]["parse_block_id"] == block
+        assert rows[0]["source_segment_id"] == segment
 
 
 # ---------------------------------------------------------------------------
@@ -757,9 +796,12 @@ def test_extract_chapter_zero_hits_returns_empty_list(tmp_path, monkeypatch):
     assert hits == []
 
 
-def test_extract_chapter_algorithm_identical_to_run_paper_extractor(tmp_path, monkeypatch):
-    """The new extract_chapter produces the same hit dict shape as
-    run_paper_extractor.extract on the same synthetic input."""
+def test_extract_chapter_hit_shape(tmp_path, monkeypatch):
+    """extract_chapter's hit dict carries the paper's (prep, det, noun)
+    fields plus occurrence coordinates and both provenance columns — the
+    shape the full-novel TSV writer and Step 4 consume. (The legacy
+    run_paper_extractor.extract was removed; this script's german_extraction
+    module is the single implementation.)"""
     from hp_corpus import german_extraction as ge
 
     monkeypatch.setattr(ge, "CONTRACTED", ["im"])
@@ -778,6 +820,8 @@ def test_extract_chapter_algorithm_identical_to_run_paper_extractor(tmp_path, mo
     assert c["prep"] == "im"
     assert c["noun"] == "Haus"
     assert c["det"] is None
+    assert c["parse_block_id"] == "synth_c#b001"
+    assert c["source_segment_id"] == "synth_c"
     assert c["prep_token_id"] == "1"
     assert c["noun_token_id"] == "2"
     assert c["pp_token_start"] == "1"
@@ -788,6 +832,8 @@ def test_extract_chapter_algorithm_identical_to_run_paper_extractor(tmp_path, mo
     assert u["prep"] == "in"
     assert u["det"] == "dem"
     assert u["noun"] == "Wald"
+    assert u["parse_block_id"] == "synth_u#b001"
+    assert u["source_segment_id"] == "synth_u"
     assert u["prep_token_id"] == "1"
     assert u["det_token_id"] == "2"
     assert u["noun_token_id"] == "3"

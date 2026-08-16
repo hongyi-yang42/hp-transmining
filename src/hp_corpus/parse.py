@@ -1,11 +1,16 @@
 """UD parsing via Stanza → CoNLL-U.
 
 Input: segmented JSONL (one Segment per line).
-Output: CoNLL-U file with one UD tree per Segment.
+Output: CoNLL-U file with one UD tree per parse block.
 
-Each UD sentence carries two comment lines:
-    # sent_id = <segment_id>
+A Segment may be split by Stanza into several sentence blocks; every
+block carries three comment lines:
+    # sent_id = <parse_block_id>          (unique; <segment_id>#bNNN)
+    # source_segment_id = <segment_id>    (the original segment id)
     # text = <segment text>
+
+The ID construction rule lives in :mod:`hp_corpus.provenance` and is
+shared with the deterministic text migration for pre-existing files.
 
 Stanza is lazy-imported so unit tests for the rest of the package don't
 require the ~1.2 GB of model files or the stanza/torch deps.
@@ -43,6 +48,8 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+
+from hp_corpus.provenance import make_parse_block_id
 
 # Per-language Stanza processor config. Chinese has no MWT (multi-word
 # token expansion); German and English do.
@@ -113,9 +120,16 @@ def parse_segments(
             text = seg["text"]
             sid = seg["id"]
             doc = nlp(text)
+            block_ordinal = 0
             for sentence in doc.sentences:
-                # CoNLL-U comment lines carry the segment ID + original text.
-                fout.write(f"# sent_id = {sid}\n")
+                block_ordinal += 1
+                # CoNLL-U comment lines carry the block-level parse id, the
+                # original segment id, and the segment text. Stanza may split
+                # one Segment into several sentence blocks; the ordinal makes
+                # every block's id unique.
+                pid = make_parse_block_id(sid, block_ordinal)
+                fout.write(f"# sent_id = {pid}\n")
+                fout.write(f"# source_segment_id = {sid}\n")
                 fout.write(f"# text = {text}\n")
                 # Iterate tokens (not words) so we can emit the CoNLL-U MWT
                 # range line (e.g. "5-6	im	_	_	…") when a token was
