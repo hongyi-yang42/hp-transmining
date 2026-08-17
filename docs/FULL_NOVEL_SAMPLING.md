@@ -16,7 +16,10 @@ Two scripts are involved:
     delegates here (kept only for invocation compatibility).
   * `scripts/build_eligible_pool.py` — the formal post-review
     selection path (`src/hp_corpus/sampling.py`). Runs **once** on a
-    completed German review; there is no sampling layer after it.
+    completed German review. The pool is a **derived** layer: the
+    complete trilingual annotation table is retained permanently, and
+    any later analysis set or proportional sample is derived from it —
+    nothing downstream overwrites the annotation table.
 
 ## Extraction
 

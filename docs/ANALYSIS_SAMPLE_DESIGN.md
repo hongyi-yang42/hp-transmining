@@ -3,11 +3,12 @@
 Status: **the formal eligible-pool rule is implemented
 (`src/hp_corpus/sampling.py` + `scripts/build_eligible_pool.py`, see
 `docs/FULL_NOVEL_SAMPLING.md`); nothing downstream of it has been
-executed.** The German review — which covers the full machine candidate
-pool — has not been run, so no eligible pool, no EN/ZH annotation, and
-no analysis exist yet. When the review is complete, the pool is built
-**once** from it; there is no sampling layer between the reviewed pool
-and annotation.
+executed.** The trilingual annotation — German validity review plus
+EN/ZH counterpart marking, covering the full machine candidate pool in
+one pass — has not been run, so no eligible pool and no analysis exist
+yet. All 1,392 rows enter annotation first; the eligible pool, any
+analysis set, and any proportional sample are later **derived**
+artifacts that never overwrite the complete annotation table.
 
 ## 1. Reproduction target
 
@@ -29,7 +30,7 @@ and annotation.
 | layer | definition | producer | cardinality |
 |---|---|---|---|
 | `machine_candidate_pool` | every paper-algorithm occurrence Ch.1–17 surviving the preposition-inventory gate | extraction (automatic) | 1,392 |
-| annotation CSV (returned) | one final `include`/`exclude` decision + optional lemma correction + EN/ZH counterpart marking per pool row | annotators on the trilingual pair CSV (human, full pool, single pass) | pending |
+| annotation CSV (returned) | one final `include`/`exclude` decision + optional lemma correction + EN/ZH counterpart marking per machine-candidate-pool row | annotators on the trilingual pair CSV (human, full pool, single pass; one copy per annotator) | pending |
 | `eligible_pool` | reviewed-include occurrences meeting the paper-literal rule (§3) | `build_eligible_pool.py` (runs once, after review) | pending |
 | `paper_sample_membership` | audit-only overlay marking membership in the authors' 96, applicable to any layer **if** the per-item list is ever obtained | — | blocked, empty |
 
@@ -41,6 +42,9 @@ Invariants:
    reorders membership in any other layer.
 3. Each layer is a separate artifact (its own file or column set).
 4. Every layer transition reports retained / excluded counts (§6).
+5. The complete trilingual annotation table is retained permanently;
+   every downstream layer (eligible pool, analysis sets, samples) is
+   derived from it and never overwrites it.
 
 ## 3. Selection procedure
 
@@ -123,7 +127,7 @@ before any annotator batch.
 | 1 | extraction | paper algorithm, Ch.1–17 | 1,394 (726 contracted / 668 uncontracted) | — |
 | 2 | preposition inventory | 13 paired prepositions | 1,392 | 2 (`um`/`vor`) |
 | 3 | structural gate | det `ART` + `det` (uncontracted only) | 1,392 (668/668 pass) | 0 |
-| 4 | German review | full pool, human validity + lemma | not started | not started |
+| 4 | trilingual annotation | full pool, one pass: DE validity + lemma + EN/ZH counterpart marking | not started | not started |
 | 5 | eligible pool | §3 rule on reviewed-include rows | pending review | pending review |
 
 Steps 1–3 are verified in the production path every time the pool CLI
@@ -218,20 +222,22 @@ Still outstanding:
 2. **Runtime verification of the provenance gate** — confirm the real
    `data/parsed/` files are migrated and pass validation at batch time
    (§5.2).
-3. **EN/ZH annotation** of the eligible pool and the downstream
-   analysis.
+3. **Downstream analysis** of the eligible pool. The EN/ZH
+   counterparts are already marked during the single full-pool
+   annotation pass; any analysis set or proportional sample is derived
+   later from the complete annotation table.
 
 ## 7. Replication-claim boundary
 
 Current status: a **transparent paper-literal re-implementation
 design** with the selection rule implemented. No replication claim is
-earned yet — the German review, EN/ZH annotation, and the downstream
-analysis are all outstanding.
+earned yet — the trilingual full-pool annotation, the eligible-pool
+build, and the downstream analysis are all outstanding.
 
 | claim | status |
 |---|---|
 | Methodological replication of extraction + selection | potentially claimable **after** the German review completes and the eligible pool is built (paper-literal rule; own parser environment documented as a deviation — Stanza here vs their unconfirmed environment, §3) |
-| Conceptual replication of the theoretical conclusions | potentially claimable **after** our EN/ZH annotation of the eligible pool and the downstream analysis |
+| Conceptual replication of the theoretical conclusions | potentially claimable **after** our trilingual full-pool annotation, the eligible-pool build, and the downstream analysis |
 | Exact / direct reproduction of the 96 | **not claimable** — no per-item provenance; 40/56/96 remain benchmark aggregates |
 | Author-filter agreement numbers | sensitivity statistic, not replication |
 
