@@ -346,3 +346,85 @@ def test_alignment_schema_margin_optional_for_old_records() -> None:
         margin=0.12,
     )
     assert rec2.margin == pytest.approx(0.12)
+
+
+# --------------------------------------------------------------------- lexical prior
+
+
+def _norm2(v: tuple[float, float]) -> np.ndarray:
+    arr = np.array([v], dtype=np.float64)
+    return arr / np.linalg.norm(arr)
+
+
+def _norm3(v: tuple[float, float, float]) -> np.ndarray:
+    arr = np.array([v], dtype=np.float64)
+    return arr / np.linalg.norm(arr)
+
+
+def test_dp_anchor_bonus_flips_shifted_pairing() -> None:
+    """Shift scenario (the real residual error class — a monotone DP cannot
+    cross): plain sims favour s0↔t0 + s1↔t1 with t2 gapped; an anchor bonus
+    on the true cells (s0↔t1, s1↔t2, t0 untranslatable) must flip the DP."""
+    src = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    tgt = np.vstack(
+        [
+            _norm3((0.8, 0.6, 0.6)),  # t0: attractive nuisance for s0
+            _norm3((0.7, 0.8, 0.3)),  # t1: s0's true partner
+            _norm3((0.6, 0.7, 0.5)),  # t2: s1's true partner
+        ]
+    )
+    bonus = np.array([[0.0, 0.25, 0.0], [0.0, 0.0, 0.25]])
+    matches = _global_dp_align(src, tgt, 0.5, bonus=bonus)
+    pairs = {(s[0], t[0]) for s, t, _, _ in matches if s and t}
+    assert (0, 1) in pairs and (1, 2) in pairs
+    # Without the bonus the DP takes the shifted pairing (regression contrast)
+    matches_plain = _global_dp_align(src, tgt, 0.5)
+    pairs_plain = {(s[0], t[0]) for s, t, _, _ in matches_plain if s and t}
+    assert (0, 0) in pairs_plain and (1, 1) in pairs_plain
+
+
+def test_dp_length_prior_rejects_imbalanced_pairing() -> None:
+    """A 5-char src sentence has sim 0.75 with a 45-char tgt and 0.72 with a
+    5-char tgt. Without the prior the DP takes the higher sim; with it, the
+    extreme length ratio tips the balance to the balanced candidate."""
+    src = np.array([[1.0, 0.0]])
+    t0 = _norm2((0.75, 0.66))  # long, slightly higher sim
+    t1 = _norm2((0.72, 0.69))
+    tgt = np.vstack([t0, t1])
+    matches = _global_dp_align(
+        src,
+        tgt,
+        0.5,
+        src_lens=[5],
+        tgt_lens=[45, 5],
+        length_mu=3.45,
+        length_tau=1.1,
+        length_penalty=0.1,
+    )
+    pairs = {(s[0], t[0]) for s, t, _, _ in matches if s and t}
+    assert pairs == {(0, 1)}
+
+
+def test_lexical_prior_kwargs_disabled_is_empty() -> None:
+    """use_lexical_prior=False must leave the DP inputs untouched."""
+    from pathlib import Path
+
+    from hp_corpus.align import AlignmentConfig, _lexical_prior_kwargs
+
+    cfg = AlignmentConfig(embed_cache_dir=Path("/tmp/x"), use_lexical_prior=False)
+    assert _lexical_prior_kwargs(["a"], ["b"], cfg) == {}
+    cfg_on = AlignmentConfig(embed_cache_dir=Path("/tmp/x"))
+    kwargs = _lexical_prior_kwargs(
+        ["Hermine kam.", "Niemand."], ["赫敏来了。", "无人。"], cfg_on
+    )
+    assert set(kwargs) == {
+        "bonus",
+        "src_lens",
+        "tgt_lens",
+        "length_mu",
+        "length_tau",
+        "length_penalty",
+    }
+    # The shared rare anchor produced a positive bonus on the matching cell.
+    assert kwargs["bonus"][0, 0] > 0.0
+    assert kwargs["bonus"][0, 1] == 0.0
