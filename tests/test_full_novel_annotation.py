@@ -35,11 +35,9 @@ def _load_script():
 
 def _write_extraction_tsv(path: Path, rows: list[dict[str, object]] | None) -> None:
     """rows=None → header-only TSV (the zero_hits_ok shape)."""
-    fields = [
-        "parse_block_id", "source_segment_id", "prep", "det", "noun",
-        "prep_token_id", "det_token_id", "noun_token_id", "pp_token_start",
-        "pp_token_end", "pp_surface", "in_filter",
-    ]
+    from hp_corpus.german_extraction import TSV_FIELDS
+
+    fields = list(TSV_FIELDS)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, delimiter="\t", lineterminator="\n")
@@ -50,6 +48,10 @@ def _write_extraction_tsv(path: Path, rows: list[dict[str, object]] | None) -> N
                 row["det"] = "-"
             if row.get("det_token_id") is None:
                 row["det_token_id"] = "-"
+            if row.get("det_xpos") is None:
+                row["det_xpos"] = "-"
+            if row.get("det_deprel") is None:
+                row["det_deprel"] = "-"
             w.writerow({k: row.get(k, "") for k in fields})
 
 
@@ -117,7 +119,8 @@ def _build_synth_repo(
         [{"parse_block_id": "hp1_de_ch01_p0001_s001#b001",
           "source_segment_id": "hp1_de_ch01_p0001_s001", "prep": "im", "noun": "Haus",
           "prep_token_id": "1", "noun_token_id": "2", "pp_token_start": "1",
-          "pp_token_end": "2", "pp_surface": "im Haus", "in_filter": "Y"}],
+          "pp_token_end": "2", "pp_surface": "im Haus", "in_filter": "Y",
+          "det_xpos": "-", "det_deprel": "-"}],
     )
     _write_extraction_tsv(
         extraction / "hp1_de_ch01_uncontracted.tsv",
@@ -125,7 +128,8 @@ def _build_synth_repo(
           "source_segment_id": "hp1_de_ch01_p0002_s001", "prep": "in", "det": "dem",
           "noun": "Wald", "prep_token_id": "1", "det_token_id": "2",
           "noun_token_id": "3", "pp_token_start": "1", "pp_token_end": "3",
-          "pp_surface": "in dem Wald", "in_filter": "Y"}],
+          "pp_surface": "in dem Wald", "in_filter": "Y",
+          "det_xpos": "ART", "det_deprel": "det"}],
     )
     _write_extraction_tsv(
         extraction / "hp1_de_ch02_contracted.tsv",
@@ -259,6 +263,28 @@ def test_master_source_hashed_editable_blank(tmp_path: Path) -> None:
         for col in EDITABLE_COLUMNS:
             expected = BUILDER_DEFAULT_EDITABLE.get(col, "")
             assert r[col] == expected, col
+
+
+def test_master_carries_s2_metadata_and_formal_lemma_schema(tmp_path: Path) -> None:
+    """The master propagates the structural-gate metadata as source
+    columns and exposes the single formal German-lemma editable column
+    (blank by default — blank means "machine lemma stands", never human
+    confirmation)."""
+    script = _load_script()
+    paths = _build_synth_repo(tmp_path)
+    rc = _run(script, tmp_path, paths, [1, 2])
+    assert rc == 0
+    rows = _read_master(tmp_path / "out" / "full_novel_annotation_master.tsv")
+    by_form = {r["de_form"]: r for r in rows}
+    assert by_form["uncontracted"]["de_det_xpos"] == "ART"
+    assert by_form["uncontracted"]["de_det_deprel"] == "det"
+    assert by_form["contracted"]["de_det_xpos"] == "-"
+    assert by_form["contracted"]["de_det_deprel"] == "-"
+    for r in rows:
+        assert r["de_corrected_head_lemma"] == ""
+    header = list(rows[0])
+    assert "de_reviewed_head_lemma" not in header
+    assert "de_manual_lemma_override" not in header
 
 
 def test_stdout_privacy_no_fixture_text(tmp_path: Path, capsys) -> None:

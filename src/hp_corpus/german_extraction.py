@@ -122,6 +122,8 @@ TSV_FIELDS = [
     "pp_token_start",
     "pp_token_end",
     "pp_surface",
+    "det_xpos",
+    "det_deprel",
     "in_filter",
 ]
 
@@ -339,6 +341,8 @@ def extract_chapter(parsed_path: Path, contracted: bool) -> list[dict]:
             current_token: str | None = None
             current_prep_id: str | None = None
             current_det_id: str | None = None
+            current_det_xpos: str | None = None
+            current_det_deprel: str | None = None
 
             for token in sentence:
                 if token.form is None or token.id is None or _is_range_id(token.id):
@@ -357,6 +361,8 @@ def extract_chapter(parsed_path: Path, contracted: bool) -> list[dict]:
                     ):
                         current_det = token.form
                         current_det_id = token.id
+                        current_det_xpos = token.xpos
+                        current_det_deprel = token.deprel
 
                 current_det_filled = current_det is not None or not needs_determiner
                 current_head_filled = (
@@ -384,6 +390,8 @@ def extract_chapter(parsed_path: Path, contracted: bool) -> list[dict]:
                             "pp_token_start": str(pp_start),
                             "pp_token_end": str(pp_end),
                             "pp_surface": surface,
+                            "det_xpos": current_det_xpos,
+                            "det_deprel": current_det_deprel,
                         }
                     )
                     current_head = None
@@ -391,6 +399,8 @@ def extract_chapter(parsed_path: Path, contracted: bool) -> list[dict]:
                     current_token = None
                     current_prep_id = None
                     current_det_id = None
+                    current_det_xpos = None
+                    current_det_deprel = None
     except GermanExtractionError:
         raise
     except Exception as exc:
@@ -514,6 +524,10 @@ def write_chapter_tsv(path: Path, hits: list[dict], matched: list[dict]) -> Path
                 row["det"] = "-"
             if row.get("det_token_id") is None:
                 row["det_token_id"] = "-"
+            if row.get("det_xpos") is None:
+                row["det_xpos"] = "-"
+            if row.get("det_deprel") is None:
+                row["det_deprel"] = "-"
             row = {k: v for k, v in row.items() if k in TSV_FIELDS}
             w.writerow(row)
     return path

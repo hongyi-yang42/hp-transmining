@@ -135,7 +135,7 @@ def test_tsv_receives_lemma_and_both_provenance_columns(
     assert row["parse_block_id"] == "synthetic_contracted#b001"
     assert row["source_segment_id"] == "synthetic_contracted"
     assert row["noun"] == "Haus"  # the noun lemma IS in the TSV
-    # The header carries the coordinate fields.
+    # The header carries the coordinate + S2 structural fields.
     tsv_content = contracted_tsv.read_text(encoding="utf-8")
     for col in (
         "parse_block_id",
@@ -146,6 +146,8 @@ def test_tsv_receives_lemma_and_both_provenance_columns(
         "pp_token_start",
         "pp_token_end",
         "pp_surface",
+        "det_xpos",
+        "det_deprel",
     ):
         assert col in tsv_content
 
@@ -166,6 +168,8 @@ def test_tsv_carries_occurrence_coordinates(tmp_path, run_paper_extractor_module
     assert row["prep_token_id"] == "1"
     assert row["noun_token_id"] == "2"
     assert row["det_token_id"] == "-"  # placeholder for contracted
+    assert row["det_xpos"] == "-"  # no det token → no S2 metadata
+    assert row["det_deprel"] == "-"
     assert row["pp_token_start"] == "1"
     assert row["pp_token_end"] == "2"
     assert row["pp_surface"] == "im Haus"
@@ -182,6 +186,10 @@ def test_tsv_carries_occurrence_coordinates(tmp_path, run_paper_extractor_module
     assert row["prep_token_id"] == "1"
     assert row["det_token_id"] == "2"
     assert row["noun_token_id"] == "3"
+    # S2 structural metadata propagated from the det token (line 2 of
+    # the fixture: dem / der / DET / ART / _ / 3 / det).
+    assert row["det_xpos"] == "ART"
+    assert row["det_deprel"] == "det"
     assert row["pp_token_start"] == "1"
     assert row["pp_token_end"] == "3"
     assert row["pp_surface"] == "in dem Wald"
