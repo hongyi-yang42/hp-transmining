@@ -6,14 +6,21 @@ from hp_corpus.clean import clean_blocks
 from hp_corpus.schema import OCRBlock
 
 
-def _blk(page: int, idx: int, text: str, conf: float = 1.0) -> OCRBlock:
+def _blk(
+    page: int,
+    idx: int,
+    text: str,
+    conf: float = 1.0,
+    bbox: list[float] | None = None,
+    engine: str = "pymupdf",
+) -> OCRBlock:
     return OCRBlock(
         page=page,
         block_idx=idx,
         text=text,
-        bbox=[0.0, 0.0, 100.0, 20.0],
+        bbox=bbox if bbox is not None else [0.0, 0.0, 100.0, 20.0],
         confidence=conf,
-        engine="pymupdf",
+        engine=engine,
     )
 
 
@@ -530,3 +537,53 @@ def test_header_pattern_u3000_matches_normalized_text(zh_textlayer_config) -> No
     body = " ".join(s.text for s in result.sentences)
     assert "分院帽" not in body
     assert "正文第一段落" in body
+
+
+def test_paddleocr_margin_outlier_dropped(zh_config) -> None:
+    """PaddleOCR stray detections at the page margin (x0 far beyond the
+    page's body cluster) are still removed by the outlier filter."""
+    cfg = zh_config
+    body_bbox = [50.0, 100.0, 550.0, 120.0]
+    blocks = [
+        _blk(1, 0, "正文第一段落。", bbox=body_bbox, engine="paddleocr"),
+        _blk(1, 1, "正文第二段落。", bbox=[50.0, 140.0, 550.0, 160.0], engine="paddleocr"),
+        _blk(1, 2, "食", bbox=[400.0, 640.0, 420.0, 660.0], engine="paddleocr"),
+        _blk(1, 3, "正文第三段落。", bbox=[50.0, 180.0, 550.0, 200.0], engine="paddleocr"),
+    ]
+    result = clean_blocks(blocks, cfg)
+    joined = "".join(s.text for s in result.sentences)
+    assert "食" not in joined
+    assert joined.count("正文") == 3
+
+
+def test_centered_text_layer_block_survives(en_config) -> None:
+    """A legitimately centered text-layer block (letter/address layout) can
+    sit far right of the body margin — beyond 3× the page's median x0 —
+    and must survive cleaning. Regression test for the ch.3 envelope
+    address dropped by the engine-blind outlier filter."""
+    cfg = en_config
+    blocks = [
+        _blk(1, 0, "The first paragraph ends here.", bbox=[40.0, 80.0, 540.0, 100.0]),
+        _blk(1, 1, "Mr. J. Smith", bbox=[134.0, 120.0, 235.0, 138.0]),
+        _blk(1, 2, "Room 17, Hotel zur Bahn", bbox=[134.0, 140.0, 260.0, 158.0]),
+        _blk(1, 3, "The body text carried on after it.", bbox=[40.0, 170.0, 540.0, 190.0]),
+        _blk(1, 4, "Another paragraph follows.", bbox=[40.0, 210.0, 540.0, 230.0]),
+    ]
+    result = clean_blocks(blocks, cfg)
+    joined = " ".join(s.text for s in result.sentences)
+    assert "Mr. J. Smith" in joined
+    assert "Hotel zur Bahn" in joined
+
+
+def test_ordinary_blocks_pass_outlier_filter(zh_config) -> None:
+    """Normal-layout blocks are untouched by the outlier filter: every
+    body block survives with its text intact."""
+    cfg = zh_config
+    blocks = [
+        _blk(1, 0, "正文第一段落。", bbox=[50.0, 100.0, 550.0, 120.0], engine="paddleocr"),
+        _blk(1, 1, "正文第二段落。", bbox=[50.0, 140.0, 550.0, 160.0], engine="paddleocr"),
+        _blk(1, 2, "正文第三段落。", bbox=[50.0, 180.0, 550.0, 200.0], engine="pymupdf"),
+    ]
+    result = clean_blocks(blocks, cfg)
+    joined = "".join(s.text for s in result.sentences)
+    assert joined.count("正文") == 3

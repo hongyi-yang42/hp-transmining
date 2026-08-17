@@ -220,10 +220,11 @@ def clean_blocks(
         in_range, span_notes = _separate_span_footnotes(in_range, span_note_cfg)
         footnotes.extend(span_notes)
 
-    # 1b. Drop blocks with implausible bbox (extreme x0 outlier — these are
-    # almost always OCR false positives like stray Latin letters or digits
-    # detected at the page margin). A block is an outlier if its x0 is more
-    # than 3x the page's median x0.
+    # 1b. Drop PaddleOCR blocks with implausible bbox (extreme x0 outlier —
+    # these are almost always OCR false positives like stray Latin letters or
+    # digits detected at the page margin). A block is an outlier if its x0 is
+    # more than 3x the page's median PaddleOCR x0. Text-layer (pymupdf)
+    # blocks never go through this filter — see _drop_bbox_outliers.
     in_range = _drop_bbox_outliers(in_range)
 
     # 1c. Whitespace-normalize every block in-range. We do this once here
@@ -320,16 +321,26 @@ def clean_blocks(
 
 
 def _drop_bbox_outliers(blocks: list[OCRBlock]) -> list[OCRBlock]:
-    """Drop blocks whose x0 is an extreme outlier within their page.
+    """Drop PaddleOCR blocks whose x0 is an extreme outlier within their page.
 
     PaddleOCR occasionally emits stray single-character detections at the
     page edge or in unexpected positions (e.g. misreading a margin mark as
     "X" or "食"). These have bbox x0 values 3–20× larger than typical body
-    text. Drop any block whose x0 exceeds 3× the page's median x0.
+    text. Drop any PaddleOCR block whose x0 exceeds 3× the page's median
+    PaddleOCR x0.
+
+    Text-layer (pymupdf) blocks are passed through untouched: legitimate
+    born-digital layout — centered letters/address blocks, chapter titles,
+    dedication lines — can sit far right of the body margin, and a
+    born-digital text layer has no detection noise to filter.
     """
     by_page: dict[int, list[float]] = defaultdict(list)
     for b in blocks:
-        if len(b.bbox) >= 4 and b.bbox[2] > b.bbox[0] > 0:
+        if (
+            b.engine == "paddleocr"
+            and len(b.bbox) >= 4
+            and b.bbox[2] > b.bbox[0] > 0
+        ):
             by_page[b.page].append(float(b.bbox[0]))
     medians: dict[int, float] = {}
     for page, xs in by_page.items():
@@ -338,7 +349,8 @@ def _drop_bbox_outliers(blocks: list[OCRBlock]) -> list[OCRBlock]:
     return [
         b
         for b in blocks
-        if b.page not in medians
+        if b.engine != "paddleocr"
+        or b.page not in medians
         or not (len(b.bbox) >= 4 and b.bbox[2] > b.bbox[0] > 0)
         or b.bbox[0] <= 3.0 * medians[b.page]
     ]
