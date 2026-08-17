@@ -48,11 +48,23 @@ MANUAL_CONFIDENCE_THRESHOLD = 0.5
 # Diagonal-band width as a fraction of length. (i, j) is reachable only when
 # |i/n - j/m| <= locality_band. 0.15 = sentences can drift by ±15% of length.
 DEFAULT_LOCALITY_BAND = 0.15
-# Penalties for non-1:1 alignments (mimic Vecalign's deletion/insertion costs).
+# Penalties for unaligned sentences (mimic Vecalign's deletion/insertion
+# costs). NOTE the sign of the tradeoff: a LOWER penalty makes gaps cheaper,
+# so the DP forces FEWER spurious pairings; raising it pushes the DP to
+# fabricate matches. With e5's cosine floor (~0.69 even for unrelated pairs)
+# a positive-similarity 1:1 beats gapping both sentences at any penalty, so
+# these constants only arbitrate between alternative multi-sentence groupings.
 PENALTY_1_TO_0 = 0.2
 PENALTY_0_TO_1 = 0.2
 # Sentence-similarity floor; below this, prefer to leave both sides unaligned.
+# (Inert in practice for e5 — no pair scores below 0.69 — kept for other
+# models and as a guard.)
 SIMILARITY_FLOOR = 0.3
+# Per-sentence-beyond-1:1 discount for N:M moves (Vecalign-style). Mean-pair
+# scoring alone would let an N:M absorb any neighbouring orphan, because e5
+# scores even unrelated pairs ≥0.69; the discount leans the DP back toward
+# 1:1 when the extra sentence adds little.
+MULTI_SENTENCE_PENALTY = 0.02
 
 
 class CacheValidationError(ValueError):
@@ -348,7 +360,7 @@ def _global_dp_align(
     src_vecs: np.ndarray,
     tgt_vecs: np.ndarray,
     band: float,
-) -> list[tuple[list[int], list[int], float]]:
+) -> list[tuple[list[int], list[int], float, float | None]]:
     """Global DP over all sentences, restricted to a diagonal band.
 
     (i, j) is reachable only when ``|i/n - j/m| <= band``. This enforces the
@@ -356,6 +368,21 @@ def _global_dp_align(
     far-apart false-positive matches. Returns one record per (src_idx_list,
     tgt_idx_list) tuple — no duplicates because each sentence index is
     consumed by exactly one transition.
+
+    Pairing moves (1:1, 1:2, 2:1, 1:3, 3:1, 2:2) score the **mean pairwise
+    cosine over the cartesian product** of the consumed sentence groups, minus
+    :data:`MULTI_SENTENCE_PENALTY` per sentence beyond the 1:1 core. Mean —
+    not max-single-pair — scoring credits every sentence the move consumes:
+    under max scoring, a 1:1 on the best-matching half always dominates the
+    N:M that also covers the remaining halves, so partial-context alignments
+    (one DE segment mapped to only the dialogue OR only the narration half of
+    its ZH counterpart) win structurally.
+
+    Each returned record carries a ``margin``: the score gap between the
+    chosen move's path total and the best competing move at the same DP cell.
+    Absolute cosine confidence is not discriminative for e5 (all pairs ≥0.69);
+    the margin — how much the winning alignment beat its nearest alternative —
+    is the ranking/review signal.
     """
     n = src_vecs.shape[0]
     m = tgt_vecs.shape[0]
@@ -375,6 +402,26 @@ def _global_dp_align(
         delta = int(max(1, band * m))
         return max(0, center - delta), min(m + 1, center + delta + 1)
 
+    def _cands(i: int, j: int) -> list[tuple[int, int, float]]:
+        """Feasible (di, dj, move_score) moves into cell (i, j)."""
+        out: list[tuple[int, int, float]] = []
+        # 1:0 / 0:1 — leave one sentence unaligned (penalized)
+        if i >= 1 and dp[i - 1, j] > NEG:
+            out.append((1, 0, -PENALTY_1_TO_0))
+        if j >= 1 and dp[i, j - 1] > NEG:
+            out.append((0, 1, -PENALTY_0_TO_1))
+        # Pairing moves — mean pairwise similarity over the consumed block.
+        for di, dj in ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1), (2, 2)):
+            pi, pj = i - di, j - dj
+            if pi < 0 or pj < 0 or dp[pi, pj] <= NEG:
+                continue
+            s = float(sims[pi:i, pj:j].mean())
+            if s < SIMILARITY_FLOOR:
+                continue
+            extra = (di - 1) + (dj - 1)
+            out.append((di, dj, s - MULTI_SENTENCE_PENALTY * extra))
+        return out
+
     for i in range(n + 1):
         j_lo, j_hi = _j_window(i)
         for j in range(j_lo, j_hi):
@@ -382,89 +429,30 @@ def _global_dp_align(
                 continue
             best = NEG
             best_move: tuple[int, int, float] | None = None
-
-            # 1:0 — src sentence i-1 unaligned (penalized)
-            if i >= 1 and dp[i - 1, j] > NEG:
-                cand = dp[i - 1, j] - PENALTY_1_TO_0
+            for di, dj, score in _cands(i, j):
+                cand = dp[i - di, j - dj] + score
                 if cand > best:
-                    best, best_move = cand, (1, 0, -PENALTY_1_TO_0)
-
-            # 0:1 — tgt sentence j-1 unaligned (penalized)
-            if j >= 1 and dp[i, j - 1] > NEG:
-                cand = dp[i, j - 1] - PENALTY_0_TO_1
-                if cand > best:
-                    best, best_move = cand, (0, 1, -PENALTY_0_TO_1)
-
-            # 1:1
-            if i >= 1 and j >= 1 and dp[i - 1, j - 1] > NEG:
-                s = float(sims[i - 1, j - 1])
-                if s >= SIMILARITY_FLOOR:
-                    cand = dp[i - 1, j - 1] + s
-                    if cand > best:
-                        best, best_move = cand, (1, 1, s)
-
-            # 1:2 — one src, two tgt
-            if i >= 1 and j >= 2 and dp[i - 1, j - 2] > NEG:
-                s = float(max(sims[i - 1, j - 2], sims[i - 1, j - 1]))
-                if s >= SIMILARITY_FLOOR:
-                    cand = dp[i - 1, j - 2] + s * 0.95
-                    if cand > best:
-                        best, best_move = cand, (1, 2, s * 0.95)
-
-            # 2:1 — two src, one tgt
-            if i >= 2 and j >= 1 and dp[i - 2, j - 1] > NEG:
-                s = float(max(sims[i - 2, j - 1], sims[i - 1, j - 1]))
-                if s >= SIMILARITY_FLOOR:
-                    cand = dp[i - 2, j - 1] + s * 0.95
-                    if cand > best:
-                        best, best_move = cand, (2, 1, s * 0.95)
-
-            # 1:3 — one src, three tgt (translator expanded src into multiple tgt sentences)
-            if i >= 1 and j >= 3 and dp[i - 1, j - 3] > NEG:
-                s = float(max(sims[i - 1, j - 3], sims[i - 1, j - 2], sims[i - 1, j - 1]))
-                if s >= SIMILARITY_FLOOR:
-                    cand = dp[i - 1, j - 3] + s * 0.90  # larger discount for 3-way merges
-                    if cand > best:
-                        best, best_move = cand, (1, 3, s * 0.90)
-
-            # 3:1 — three src, one tgt (translator condensed)
-            if i >= 3 and j >= 1 and dp[i - 3, j - 1] > NEG:
-                s = float(max(sims[i - 3, j - 1], sims[i - 2, j - 1], sims[i - 1, j - 1]))
-                if s >= SIMILARITY_FLOOR:
-                    cand = dp[i - 3, j - 1] + s * 0.90
-                    if cand > best:
-                        best, best_move = cand, (3, 1, s * 0.90)
-
-            # 2:2 — two src, two tgt (rare but occurs in dialogue-heavy passages)
-            if i >= 2 and j >= 2 and dp[i - 2, j - 2] > NEG:
-                s = float(
-                    max(
-                        sims[i - 2, j - 2],
-                        sims[i - 2, j - 1],
-                        sims[i - 1, j - 2],
-                        sims[i - 1, j - 1],
-                    )
-                )
-                if s >= SIMILARITY_FLOOR:
-                    cand = dp[i - 2, j - 2] + s * 0.92
-                    if cand > best:
-                        best, best_move = cand, (2, 2, s * 0.92)
+                    best, best_move = cand, (di, dj, score)
 
             if best_move is not None:
                 dp[i, j] = best
                 back[i][j] = best_move
 
-    matches: list[tuple[list[int], list[int], float]] = []
+    matches: list[tuple[list[int], list[int], float, float | None]] = []
     i, j = n, m
     while i > 0 or j > 0:
         move = back[i][j]
         if move is None:
             break
         di, dj, score = move
+        alt_totals = [
+            dp[i - a, j - b] + s for a, b, s in _cands(i, j) if (a, b) != (di, dj)
+        ]
+        margin = float(dp[i, j] - max(alt_totals)) if alt_totals else None
         src_idx = list(range(i - di, i)) if di else []
         tgt_idx = list(range(j - dj, j)) if dj else []
         if src_idx or tgt_idx:
-            matches.append((src_idx, tgt_idx, max(0.0, score)))
+            matches.append((src_idx, tgt_idx, max(0.0, score), margin))
         i -= di
         j -= dj
 
@@ -503,7 +491,7 @@ def align_segments(
 
     records: list[Alignment] = []
     align_n = 0
-    for src_idx_list, tgt_idx_list, score in _global_dp_align(
+    for src_idx_list, tgt_idx_list, score, margin in _global_dp_align(
         src_vecs, tgt_vecs, config.locality_band
     ):
         src_ids = [src[i].id for i in src_idx_list if 0 <= i < len(src)]
@@ -521,6 +509,7 @@ def align_segments(
                 type=type_str,  # type: ignore[arg-type]
                 confidence=max(0.0, min(1.0, score)),
                 method=method,  # type: ignore[arg-type]
+                margin=margin,
                 validated=False,
             )
         )
@@ -540,6 +529,7 @@ def alignment_summary(alignments: list[Alignment]) -> dict[str, Any]:
     if not alignments:
         return {"count": 0}
     confs = [a.confidence for a in alignments]
+    margins = [a.margin for a in alignments if a.margin is not None]
     by_type: dict[str, int] = {}
     by_method: dict[str, int] = {}
     for a in alignments:
@@ -549,6 +539,8 @@ def alignment_summary(alignments: list[Alignment]) -> dict[str, Any]:
         "count": len(alignments),
         "mean_confidence": sum(confs) / len(confs),
         "below_0p5": sum(1 for c in confs if c < 0.5),
+        "mean_margin": (sum(margins) / len(margins)) if margins else None,
+        "margin_below_0p02": sum(1 for mg in margins if mg < 0.02),
         "by_type": by_type,
         "by_method": by_method,
     }

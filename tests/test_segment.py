@@ -35,6 +35,45 @@ def test_zh_preserves_quoted_terminator() -> None:
     assert parts[1] == "然后离开。"
 
 
+def test_zh_dialogue_final_quote_still_splits() -> None:
+    """Quote content ends in a terminator → the quoted sentence stands alone,
+    attribution becomes its own segment (matches the EN splitter)."""
+    parts = _split_zh("「到这儿来。」她说。")
+    assert parts == ["「到这儿来。」", "她说。"]
+
+
+def test_zh_mid_sentence_quote_close_does_not_split() -> None:
+    """「好吧，」-style quotes close mid-sentence; splitting there strands a
+    content-free attribution fragment (他说。) downstream. Must stay whole."""
+    parts = _split_zh("「好吧，」他说。")
+    assert parts == ["「好吧，」他说。"]
+
+
+def test_zh_inner_quote_close_never_splits() -> None:
+    """Only the outermost quote's close can split, and only on a terminator."""
+    parts = _split_zh("他说：「我说『走吧。』然后离开。」之后再见。")
+    assert parts == ["他说：「我说『走吧。』然后离开。」", "之后再见。"]
+
+
+def test_de_splits_after_closing_guillemet() -> None:
+    """German dialogue puts the sentence-final period inside the closing «.
+    The split must fall after « so dialogue and narration separate."""
+    parts = _split_en("»Komm hierher.« Er stand auf.", abbreviations=[])
+    assert parts == ["»Komm hierher.«", "Er stand auf."]
+
+
+def test_de_splits_between_consecutive_dialogue_turns() -> None:
+    """Two speakers' turns must not merge into one segment."""
+    parts = _split_en(
+        "»Ich habe ihn verbrannt.« »Es war kein Versehen«, rief Harry.",
+        abbreviations=[],
+    )
+    assert parts == [
+        "»Ich habe ihn verbrannt.«",
+        "»Es war kein Versehen«, rief Harry.",
+    ]
+
+
 def test_en_splits_on_terminator_followed_by_space() -> None:
     parts = _split_en("First sentence. Second sentence! Third?", abbreviations=[])
     assert parts == ["First sentence.", "Second sentence!", "Third?"]

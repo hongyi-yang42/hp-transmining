@@ -79,5 +79,10 @@ class Alignment(BaseModel):
     zh: list[str] = Field(description="List of Chinese Segment IDs")
     type: Literal["1:0", "0:1", "1:1", "1:2", "2:1", "1:3", "3:1", "2:2"]
     confidence: float = Field(ge=0.0, le=1.0)
+    # Score gap between the chosen DP move's path total and the best competing
+    # move at the same cell. Absolute cosine confidence is not discriminative
+    # for e5 (all pairs >= 0.69); the margin is the ranking/review signal.
+    # None for records that predate margin support or had no competitor.
+    margin: float | None = Field(default=None, ge=0.0)
     method: Literal["vecalign_labse", "manual"]
     validated: bool = False
