@@ -272,6 +272,45 @@ def test_de_preserves_lexical_hyphen(de_config) -> None:
     assert "Wohlfühl-Essen" in result.sentences[0].text
 
 
+def test_de_intra_block_line_wrap_hyphen_repaired(de_config) -> None:
+    """Born-digital blocks wrap words INSIDE one block ('Kran-\\nkenflügel');
+    the repair must join them before whitespace normalization flattens the
+    newline into 'Kran- kenflügel'."""
+    cfg = de_config
+    blocks = [
+        _blk(1, 0, "Sie ging zum Kran-\nkenflügel im Keller."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert "Krankenflügel" in result.sentences[0].text
+    assert "Kran- kenflügel" not in result.sentences[0].text
+
+
+def test_de_intra_block_hyphen_before_capitalized_kept(de_config) -> None:
+    """Same policy as the block-boundary repair: capitalized continuations are
+    not demonstrably line-wraps, so the hyphen is kept."""
+    cfg = de_config
+    blocks = [
+        _blk(1, 0, "Ein Wort wie Schul-\nHaus bleibt getrennt."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    assert "Schul- Haus" in result.sentences[0].text
+    assert "SchulHaus" not in result.sentences[0].text
+
+
+def test_de_dialogue_turn_after_closed_guillemet_starts_paragraph(de_config) -> None:
+    """A dialogue line ending »…Satz.« must count as terminator-ending so the
+    next »-opening block (a new speaker's turn) starts a new paragraph instead
+    of merging into one."""
+    cfg = de_config
+    blocks = [
+        _blk(1, 0, "»Erste Runde des Gesprächs.«"),
+        _blk(1, 1, "»Zweite Runde«, sagte er."),
+    ]
+    result = clean_blocks(blocks, cfg)
+    texts = [s.text for s in result.sentences]
+    assert texts == ["»Erste Runde des Gesprächs.«", "»Zweite Runde«, sagte er."]
+
+
 def test_zh_unaffected_by_de_line_join(zh_config) -> None:
     """Chinese line joining must remain direct concatenation (no space added)
     after the German fix introduces the lang-in-(en,de) branch."""

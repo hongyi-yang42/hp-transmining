@@ -45,7 +45,14 @@ _ZH_QUOTE_PAIRS = (
 
 
 def _split_zh(text: str, preserve_ellipsis: bool = True) -> list[str]:
-    """Split Chinese text on 。！？；, honoring matching quote pairs.
+    """Split Chinese text on 。！？, honoring matching quote pairs.
+
+    A closing quote splits only when it closes the **outermost** quote AND the
+    quoted content ends in a sentence terminator — the dialogue convention
+    「到这儿来。」她说。, where the quoted sentence stands alone. A quote
+    closing mid-sentence (「好吧，」他说。) stays attached to its attribution;
+    splitting there strands content-free fragments (他说。) that downstream
+    alignment matches to anything. Inner quotes never split.
 
     With ``preserve_ellipsis=True`` (default), an ellipsis immediately followed
     by a terminator (``……。``) still triggers a split on the terminator, but a
@@ -62,11 +69,10 @@ def _split_zh(text: str, preserve_ellipsis: bool = True) -> list[str]:
         cur.append(ch)
         if open_stack and ch in close_to_open and close_to_open[ch] == open_stack[-1]:
             open_stack.pop()
-            # Chinese dialogue convention: split at the closing quote so the
-            # quoted sentence stands alone. Subsequent narration starts a new
-            # sentence.
-            out.append("".join(cur).strip())
-            cur = []
+            prev = cur[-2] if len(cur) >= 2 else ""
+            if not open_stack and prev in _ZH_SPLIT_CHARS:
+                out.append("".join(cur).strip())
+                cur = []
         elif ch in open_quotes:
             open_stack.append(ch)
         elif ch in _ZH_SPLIT_CHARS and not open_stack:
@@ -114,8 +120,17 @@ def _split_en(text: str, abbreviations: list[str]) -> list[str]:
             masked = masked.replace(abbr, ph)
             placeholders.append((ph, abbr))
 
-    # Split on . ! ? followed by optional closing quote/paren, then whitespace or end.
-    parts = re.split(r"(?<=[.!?])(?:[\"'\)\]]?)(?:\s+|$)", masked)
+    # Split after . ! ? (optionally followed by ONE closing quote/paren) when
+    # whitespace or end follows. Both alternatives are zero-width so the
+    # closing mark is RETAINED on the sentence — a consuming pattern silently
+    # drops it (»Ende.« → "»Ende."). The class includes German guillemets:
+    # German dialogue puts the sentence-final period inside the closing «, so
+    # without it the dialogue-final period never splits and dialogue +
+    # following narration (and consecutive turns) merge into one segment.
+    parts = re.split(
+        r"(?<=[.!?])(?=\s|$)|(?<=[.!?][\"'\)\]»«])(?=\s|$)",
+        masked,
+    )
     out: list[str] = []
     for p in parts:
         p = p.strip()

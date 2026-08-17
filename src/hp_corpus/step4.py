@@ -164,11 +164,13 @@ SOURCE_COLUMNS: tuple[str, ...] = (
     "en_alignment_cardinality",
     "en_alignment_status",
     "en_alignment_confidence",
+    "en_alignment_margin",
     "zh_sentence_ids",
     "zh_aligned_text",
     "zh_alignment_cardinality",
     "zh_alignment_status",
     "zh_alignment_confidence",
+    "zh_alignment_margin",
     "pilot_selected",
     "pilot_selection_reason",
     "source_row_sha256",
@@ -397,6 +399,7 @@ class _AlignmentRecord:
     sides: tuple[_AlignmentSide, _AlignmentSide]
     type_str: str
     confidence: float
+    margin: float | None = None
 
     def side_for_lang(self, lang: str) -> _AlignmentSide | None:
         for s in self.sides:
@@ -528,6 +531,9 @@ def _load_alignments(
                     sides=(sides[0], sides[1]),
                     type_str=rec.get("type", ""),
                     confidence=float(rec.get("confidence", 0.0)),
+                    margin=(
+                        float(rec["margin"]) if rec.get("margin") is not None else None
+                    ),
                 )
                 src_side = record.side_for_lang(src_lang)
                 if src_side is None or not src_side.sentence_ids:
@@ -766,12 +772,18 @@ def build_candidates(
                     "en_alignment_cardinality": _cardinality(de_side_en, en_side),
                     "en_alignment_status": _status_for(sent_id, de_en_alignments, "en"),
                     "en_alignment_confidence": en_rec.confidence if en_rec else 0.0,
+                    "en_alignment_margin": (
+                        en_rec.margin if en_rec is not None else None
+                    ),
                     # ZH
                     "zh_sentence_ids": list(zh_side.sentence_ids) if zh_side else [],
                     "zh_aligned_text": _aligned_text(zh_side, zh_segments),
                     "zh_alignment_cardinality": _cardinality(de_side_zh, zh_side),
                     "zh_alignment_status": _status_for(sent_id, de_zh_alignments, "zh"),
                     "zh_alignment_confidence": zh_rec.confidence if zh_rec else 0.0,
+                    "zh_alignment_margin": (
+                        zh_rec.margin if zh_rec is not None else None
+                    ),
                     # Pilot (filled later by select_pilot)
                     "pilot_selected": False,
                     "pilot_selection_reason": "",

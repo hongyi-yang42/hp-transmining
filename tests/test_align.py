@@ -25,10 +25,11 @@ import pytest
 from hp_corpus.align import (
     CacheValidationError,
     _build_cache_identity,
+    _global_dp_align,
     _lang_of_segments,
     embed_sentences,
 )
-from hp_corpus.schema import Segment
+from hp_corpus.schema import Alignment, Segment
 
 _ID_LANG_RE = __import__("re").compile(r"^[a-z0-9]+_([a-z]{2,3})_ch\d{2}_p\d{4}_s\d{3}$")
 
@@ -278,3 +279,70 @@ def test_cache_identity_invariant_to_call_order(tmp_path: Path, fake_encoder) ->
     assert files_order1 == files_order2, (
         f"cache layout depends on call order:\n order1={files_order1}\n order2={files_order2}"
     )
+
+
+# --------------------------------------------------------------------- DP scoring
+#
+# Mean-pair scoring + margin: regression tests for the alignment-DP rework.
+# Under the old max-single-pair scoring (×0.95/0.90 discounts), a 1:1 on the
+# best-matching half always dominated the 1:2 that also covered the remaining
+# half, so partial-context alignments won structurally.
+
+
+def _unit(angle_deg: float) -> np.ndarray:
+    a = np.deg2rad(angle_deg)
+    return np.array([[np.cos(a), np.sin(a)]], dtype=np.float64)
+
+
+def test_dp_prefers_1_to_2_over_1_to_1_plus_gap() -> None:
+    """One src sentence genuinely covering two tgt sentences: the 1:2 must beat
+    a 1:1 on the better half + a gap for the other (0.825 mean vs 0.9 - 0.2)."""
+    src = _unit(0.0)
+    tgt = np.vstack([_unit(np.rad2deg(np.arccos(0.90))), _unit(np.rad2deg(np.arccos(0.75)))])
+    matches = _global_dp_align(src, tgt, band=0.5)
+    assert [(s, t) for s, t, _, _ in matches] == [([0], [0, 1])]
+    score, margin = matches[0][2], matches[0][3]
+    assert score == pytest.approx((0.90 + 0.75) / 2 - 0.02, abs=1e-6)
+    # Alternative was 1:1 on the better half + 0:1 gap: 0.90 - 0.2
+    assert margin == pytest.approx(0.805 - 0.70, abs=1e-6)
+
+
+def test_dp_does_not_absorb_unrelated_neighbor() -> None:
+    """A second tgt sentence clearly unrelated to the src (sim 0.5 vs 0.95)
+    must NOT be absorbed into a spurious 1:2 — it stays gapped."""
+    src = _unit(0.0)
+    tgt = np.vstack([_unit(np.rad2deg(np.arccos(0.95))), _unit(np.rad2deg(np.arccos(0.50)))])
+    matches = _global_dp_align(src, tgt, band=0.5)
+    assert [(s, t) for s, t, _, _ in matches] == [([0], [0]), ([], [1])]
+
+
+def test_dp_margin_nonnegative_and_present() -> None:
+    """Every match on a competitive cell carries a >= 0 margin."""
+    rng = np.random.default_rng(7)
+    src = rng.normal(size=(6, 8))
+    tgt = rng.normal(size=(7, 8))
+    matches = _global_dp_align(src, tgt, band=0.5)
+    assert matches
+    margins = [m for _, _, _, m in matches if m is not None]
+    assert margins and all(m >= -1e-9 for m in margins)
+
+
+def test_alignment_schema_margin_optional_for_old_records() -> None:
+    """Alignment records written before the margin field existed (no margin
+    key) must still validate, with margin defaulting to None."""
+    rec = Alignment.model_validate_json(
+        '{"align_id":"a0001","en":["hp1_en_ch01_p0001_s001"],'
+        '"zh":["hp1_zh_ch01_p0001_s001"],"type":"1:1","confidence":0.8,'
+        '"method":"vecalign_labse","validated":false}'
+    )
+    assert rec.margin is None
+    rec2 = Alignment(
+        align_id="a0002",
+        en=["hp1_en_ch01_p0001_s002"],
+        zh=["hp1_zh_ch01_p0001_s002"],
+        type="1:1",
+        confidence=0.8,
+        method="vecalign_labse",
+        margin=0.12,
+    )
+    assert rec2.margin == pytest.approx(0.12)

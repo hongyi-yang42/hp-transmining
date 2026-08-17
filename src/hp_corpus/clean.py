@@ -35,7 +35,10 @@ from .text_split import split_concat
 
 # Sentence terminators used for cross-page rejoin decisions.
 _TERMINATORS_ZH = "。！？；”’》）】》\"'"
-_TERMINATORS_EN = ".!?\";'…)]"
+# German guillemets included: a dialogue line ends »…Satz.«, so paragraph
+# assembly (new dialogue line after a terminator-ending line) must see « as a
+# terminator-ending text.
+_TERMINATORS_EN = ".!?\";'…)]»«"
 _TERMINATORS = _TERMINATORS_ZH + _TERMINATORS_EN
 
 # When ``clean.concat_split`` is enabled, a token must appear at least this
@@ -95,6 +98,14 @@ def _strip_block_text(text: str) -> str:
     # indent signal and the final paragraph text strips it again.
     m = re.match(r"　+", text)
     prefix = m.group(0)[0] if m else ""
+    # Repair end-of-line hyphenation *inside* a block before the whitespace
+    # normalize flattens the newline: letter + "-" + line break + lowercase
+    # continuation is a wrapped compound ("Kran-\nkenflügel" →
+    # "Krankenflügel"). The block-boundary repair in _assemble_paragraphs
+    # cannot see these — it only receives already-flattened text. Same
+    # lowercase-continuation guard as there; capitalized continuations stay
+    # hyphenated by policy.
+    text = re.sub(r"([A-Za-zÄÖÜäöüß])-[\n\r]+([a-zäöüß])", r"\1\2", text)
     # Normalize any whitespace run (incl. \n, \t, \xa0) to a single space.
     # Born-digital PDF text layers frequently separate words within a block
     # with \n; collapsing those to nothing (the old behavior) joined the
