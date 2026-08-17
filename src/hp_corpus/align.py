@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from .lexicon import anchor_weights, extract_anchors, lexical_bonus_matrix
 from .schema import Alignment, Segment
 
 _SEGMENT_ID_LANG_RE = re.compile(r"^[a-z0-9]+_([a-z]{2,3})_ch\d{2}_p\d{4}_s\d{3}$")
@@ -115,6 +117,24 @@ class AlignmentConfig:
     # exists. Useful for forcing a clean re-encode after model upgrades or
     # suspected cache corruption.
     force_recompute: bool = False
+    # --- Lexical prior (see hp_corpus.lexicon) -----------------------------
+    # Add an IDF-weighted anchor bonus (shared proper nouns / distinctive
+    # numbers) to the cosine matrix, and penalize pairing moves whose total
+    # character-length ratio deviates far beyond the corpus norm. Targets the
+    # residual error classes where e5 is not discriminative: crossed 1:1
+    # pairings in dialogue, and short units force-paired with long ones.
+    use_lexical_prior: bool = True
+    # Calibrated on Ch.1-17 sandbox attribution-consistency: 0.3 is the
+    # plateau point (58.8% baseline -> 69.8%; 0.4-0.5 dip slightly as the
+    # capped bonus saturates into a binary "shares a rare anchor" signal).
+    anchor_weight: float = 0.3
+    anchor_bonus_cap: float = 0.15
+    # de/zh char-ratio distribution on high-margin 1:1 pairs of this corpus:
+    # median 3.45, |log deviation| ~1.1 at p5/p95. Pairs inside the band are
+    # untouched; beyond it the penalty grows linearly in log space.
+    length_ratio_mu: float = 3.45
+    length_ratio_tau: float = 1.1
+    length_penalty: float = 0.05
 
 
 def load_segments(path: str | Path) -> list[Segment]:
@@ -364,6 +384,13 @@ def _global_dp_align(
     src_vecs: np.ndarray,
     tgt_vecs: np.ndarray,
     band: float,
+    *,
+    bonus: np.ndarray | None = None,
+    src_lens: list[int] | None = None,
+    tgt_lens: list[int] | None = None,
+    length_mu: float = 3.45,
+    length_tau: float = 1.1,
+    length_penalty: float = 0.1,
 ) -> list[tuple[list[int], list[int], float, float | None]]:
     """Global DP over all sentences, restricted to a diagonal band.
 
@@ -394,6 +421,8 @@ def _global_dp_align(
         return []
 
     sims = src_vecs @ tgt_vecs.T  # (n, m)
+    if bonus is not None:
+        sims = sims + bonus
 
     NEG = -1e9
     dp = np.full((n + 1, m + 1), NEG, dtype=np.float64)
@@ -405,6 +434,21 @@ def _global_dp_align(
         center = int(round(i * m / n))
         delta = int(max(1, band * m))
         return max(0, center - delta), min(m + 1, center + delta + 1)
+
+    def _length_prior(pi: int, i: int, pj: int, j: int) -> float:
+        """Penalty for a pairing move whose consumed character totals sit far
+        outside the corpus length-ratio band. Applied at the MOVE level (total
+        chars of the consumed group on each side), not per pair — a long DE
+        quote legitimately pairs with a short ZH attribution member inside an
+        N:M block; only the group totals should look balanced."""
+        if length_penalty <= 0 or src_lens is None or tgt_lens is None:
+            return 0.0
+        ls = sum(src_lens[pi:i])
+        lt = sum(tgt_lens[pj:j])
+        if lt == 0:
+            return 0.0
+        deviation = abs(math.log((ls / lt) / length_mu))
+        return length_penalty * max(0.0, deviation - length_tau)
 
     def _cands(i: int, j: int) -> list[tuple[int, int, float]]:
         """Feasible (di, dj, move_score) moves into cell (i, j)."""
@@ -423,7 +467,15 @@ def _global_dp_align(
             if s < SIMILARITY_FLOOR:
                 continue
             extra = (di - 1) + (dj - 1)
-            out.append((di, dj, s - MULTI_SENTENCE_PENALTY * extra))
+            out.append(
+                (
+                    di,
+                    dj,
+                    s
+                    - MULTI_SENTENCE_PENALTY * extra
+                    - _length_prior(pi, i, pj, j),
+                )
+            )
         return out
 
     for i in range(n + 1):
@@ -464,6 +516,34 @@ def _global_dp_align(
     return matches
 
 
+def _lexical_prior_kwargs(
+    src_texts: list[str], tgt_texts: list[str], config: AlignmentConfig
+) -> dict[str, Any]:
+    """Keyword arguments for :func:`_global_dp_align` implementing the
+    lexical prior, or an empty dict when disabled. Kept as a helper so the
+    DP function stays embeddable/testable in isolation."""
+    if not config.use_lexical_prior:
+        return {}
+    src_anchor_sets = [extract_anchors(t) for t in src_texts]
+    tgt_anchor_sets = [extract_anchors(t) for t in tgt_texts]
+    weights = anchor_weights(src_anchor_sets + tgt_anchor_sets)
+    bonus = lexical_bonus_matrix(
+        src_anchor_sets,
+        tgt_anchor_sets,
+        weights,
+        weight=config.anchor_weight,
+        cap=config.anchor_bonus_cap,
+    )
+    return {
+        "bonus": bonus,
+        "src_lens": [len(t) for t in src_texts],
+        "tgt_lens": [len(t) for t in tgt_texts],
+        "length_mu": config.length_ratio_mu,
+        "length_tau": config.length_ratio_tau,
+        "length_penalty": config.length_penalty,
+    }
+
+
 def align_segments(
     src: list[Segment],
     tgt: list[Segment],
@@ -496,7 +576,10 @@ def align_segments(
     records: list[Alignment] = []
     align_n = 0
     for src_idx_list, tgt_idx_list, score, margin in _global_dp_align(
-        src_vecs, tgt_vecs, config.locality_band
+        src_vecs,
+        tgt_vecs,
+        config.locality_band,
+        **_lexical_prior_kwargs(src_texts, tgt_texts, config),
     ):
         src_ids = [src[i].id for i in src_idx_list if 0 <= i < len(src)]
         tgt_ids = [tgt[i].id for i in tgt_idx_list if 0 <= i < len(tgt)]
