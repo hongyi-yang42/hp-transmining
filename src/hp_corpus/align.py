@@ -51,11 +51,15 @@ DEFAULT_LOCALITY_BAND = 0.15
 # Penalties for unaligned sentences (mimic Vecalign's deletion/insertion
 # costs). NOTE the sign of the tradeoff: a LOWER penalty makes gaps cheaper,
 # so the DP forces FEWER spurious pairings; raising it pushes the DP to
-# fabricate matches. With e5's cosine floor (~0.69 even for unrelated pairs)
-# a positive-similarity 1:1 beats gapping both sentences at any penalty, so
-# these constants only arbitrate between alternative multi-sentence groupings.
-PENALTY_1_TO_0 = 0.2
-PENALTY_0_TO_1 = 0.2
+# fabricate matches. 0.1 (not Vecalign's default) is calibrated against e5's
+# cosine range on this corpus (true pairs ≈0.75–0.9, shifted/wrong 1:1 ≈0.70):
+# at 0.2, a wrong shifted 1:1 (≈+0.72) beats the correct pairing plus one gap
+# (≈0.85 − 0.2 = 0.65), so whole dialogue runs slid by ±1–3 sentences; at 0.1
+# the correct path wins again (0.75 > 0.72). A positive-similarity 1:1 still
+# beats gapping BOTH sentences at any penalty (e5 never scores below ~0.69),
+# so this only arbitrates shift-vs-gap and multi-sentence groupings.
+PENALTY_1_TO_0 = 0.1
+PENALTY_0_TO_1 = 0.1
 # Sentence-similarity floor; below this, prefer to leave both sides unaligned.
 # (Inert in practice for e5 — no pair scores below 0.69 — kept for other
 # models and as a guard.)

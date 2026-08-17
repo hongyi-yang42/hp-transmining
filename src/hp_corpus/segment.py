@@ -88,9 +88,57 @@ def _split_zh(text: str, preserve_ellipsis: bool = True) -> list[str]:
         # The flag exists for symmetry with config and future tuning.
         pass
 
+    out = _merge_attribution_fragments(out)
+
     # Skip fragments that contain no CJK chars (e.g. lone "X" OCR noise or
     # standalone closing quote). Downstream alignment can't use them.
     return [s for s in out if s and _has_cjk(s)]
+
+
+# A closing quote right after a terminator splits the quoted sentence off
+# (「到这儿来。」她说。 → 「到这儿来。」 + 她说。) to mirror the EN/DE
+# splitters. But the bare-attribution remainder (她说。) is 2–6 chars of
+# pure function words whose embedding is noise; forced to "align" somewhere,
+# it displaces the correct pairing for a whole run of neighbouring
+# sentences. Merging it back into the quoted sentence restores ZH granularity
+# one-to-one with the DE dialogue segment (»Komm her.«, sagte sie. never
+# splits). Measured on the full novel: 191 such fragments, every one
+# force-paired to an unrelated DE sentence.
+_ZH_CLOSING_QUOTES = frozenset(_ZH_QUOTE_PAIRS[1::2])
+_ZH_SPEECH_VERBS = "说问喊叫答嚷吼道"
+# 8 catches the pure-function fragments (哈利说。/帽子喊道。). Manner-bearing
+# attributions (男孩突然朝前面的窗户点头说。) carry real content, embed
+# usefully, and must stay separate — raising the cap to 12 was tried and
+# measurably degraded alignment (content-bearing tails merged, neighbouring
+# clusters shifted).
+_ATTRIBUTION_MAX_CHARS = 8
+
+
+def _is_attribution_fragment(seg: str) -> bool:
+    """True for a bare speech-attribution tail like 哈利说。/海格低声问。—
+    short, quote-free, ending in a terminator, containing a speech verb."""
+    return (
+        len(seg) <= _ATTRIBUTION_MAX_CHARS
+        and not any(q in seg for q in _ZH_QUOTE_PAIRS)
+        and seg[-1] in _ZH_SPLIT_CHARS + "…"
+        and any(v in seg for v in _ZH_SPEECH_VERBS)
+        and _has_cjk(seg)
+    )
+
+
+def _merge_attribution_fragments(parts: list[str]) -> list[str]:
+    merged: list[str] = []
+    for seg in parts:
+        if (
+            merged
+            and merged[-1]
+            and merged[-1][-1] in _ZH_CLOSING_QUOTES
+            and _is_attribution_fragment(seg)
+        ):
+            merged[-1] += seg
+        else:
+            merged.append(seg)
+    return merged
 
 
 def _has_cjk(text: str) -> bool:

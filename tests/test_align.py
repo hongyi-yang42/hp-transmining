@@ -296,15 +296,15 @@ def _unit(angle_deg: float) -> np.ndarray:
 
 def test_dp_prefers_1_to_2_over_1_to_1_plus_gap() -> None:
     """One src sentence genuinely covering two tgt sentences: the 1:2 must beat
-    a 1:1 on the better half + a gap for the other (0.825 mean vs 0.9 - 0.2)."""
+    a 1:1 on the better half + a gap for the other (0.825 mean vs 0.9 - 0.1)."""
     src = _unit(0.0)
     tgt = np.vstack([_unit(np.rad2deg(np.arccos(0.90))), _unit(np.rad2deg(np.arccos(0.75)))])
     matches = _global_dp_align(src, tgt, band=0.5)
     assert [(s, t) for s, t, _, _ in matches] == [([0], [0, 1])]
     score, margin = matches[0][2], matches[0][3]
     assert score == pytest.approx((0.90 + 0.75) / 2 - 0.02, abs=1e-6)
-    # Alternative was 1:1 on the better half + 0:1 gap: 0.90 - 0.2
-    assert margin == pytest.approx(0.805 - 0.70, abs=1e-6)
+    # Alternative was 1:1 on the better half + 0:1 gap: 0.90 - PENALTY_0_TO_1
+    assert margin == pytest.approx(0.805 - (0.90 - 0.1), abs=1e-6)
 
 
 def test_dp_does_not_absorb_unrelated_neighbor() -> None:
