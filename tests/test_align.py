@@ -580,3 +580,97 @@ def test_default_config_keeps_new_modes_off() -> None:
     cfg = AlignmentConfig(embed_cache_dir=Path("/tmp/x"))
     assert cfg.similarity_mode == "cosine"
     assert cfg.two_pass is False
+    # Judge-calibrated defaults: arity-5 grouping + softened multi penalty.
+    assert cfg.max_group == 5
+    assert cfg.multi_penalty == 0.01
+
+
+# --------------------------------------------------------------------- grouping
+#
+# max_group arity expansion + length-scaled multi-sentence penalty: the judge
+# audit showed 43% of ZH sentences map to >1 DE sentence (8% to >=4) and 47
+# pairs miss exactly one short attribution neighbour.
+
+
+def test_move_enumeration_reproduces_legacy_set_at_three() -> None:
+    def enumerate_moves(mg: int) -> set[tuple[int, int]]:
+        return {
+            (di, dj) for di in range(1, mg + 1) for dj in range(1, mg + 1) if 1 < di + dj <= mg + 1
+        }
+
+    assert enumerate_moves(3) == {
+        (1, 1),
+        (1, 2),
+        (2, 1),
+        (1, 3),
+        (3, 1),
+        (2, 2),
+    }
+    assert enumerate_moves(4) == enumerate_moves(3) | {
+        (1, 4),
+        (4, 1),
+        (2, 3),
+        (3, 2),
+    }
+    assert enumerate_moves(5) == enumerate_moves(4) | {
+        (1, 5),
+        (5, 1),
+        (2, 4),
+        (4, 2),
+        (3, 3),
+    }
+
+
+def test_short_attribution_neighbour_joins_group_nearly_free() -> None:
+    """One src sentence, tgt = [true partner (0.90), neighbour (0.74)].
+    With multi_penalty=0.05: a short (15-char) neighbour joins the group
+    (mean 0.82 - 0.0125 > 0.90 - 0.1); a full-length (60+ char) neighbour
+    does not (0.82 - 0.05 < 0.80)."""
+    src = np.array([[1.0, 0.0]])
+    t_main = _unitv((0.90, 0.436))
+    t_extra = _unitv((0.74, 0.672))
+    tgt = np.vstack([t_main, t_extra])
+    # Lengths follow the corpus de/zh char ratio (mu=3.45) so the length
+    # prior stays quiet and the multi-penalty scaling is what decides.
+    joined = _global_dp_align(
+        src,
+        tgt,
+        0.5,
+        src_lens=[100],
+        tgt_lens=[29, 4],
+        multi_penalty=0.05,
+    )
+    assert [(s, t) for s, t, _, _ in joined if s and t] == [([0], [0, 1])]
+
+    rejected = _global_dp_align(
+        src,
+        tgt,
+        0.5,
+        src_lens=[100],
+        tgt_lens=[29, 25],
+        multi_penalty=0.05,
+    )
+    assert [(s, t) for s, t, _, _ in rejected if s and t] == [([0], [0])]
+    assert any(s == [] and t == [1] for s, t, _, _ in rejected)
+
+
+def test_max_group_five_expresses_one_to_four_group() -> None:
+    """Four target sentences all close to the src (sims ~0.9): with
+    max_group=5 the DP takes a single 1:4 group; with the legacy cap of 3
+    it cannot, and at least one target must be left out."""
+    rng = np.random.default_rng(3)
+    base = rng.normal(size=8)
+    src = np.array([base / np.linalg.norm(base)])
+    offsets = [rng.normal(scale=0.25, size=8) for _ in range(4)]
+    tgt = np.vstack([(base + o) / np.linalg.norm(base + o) for o in offsets])
+    tgt_sims = (src @ tgt.T).ravel()
+    assert tgt_sims.min() > 0.85  # all four are genuinely close
+
+    kwargs = dict(src_lens=[100], tgt_lens=[25, 25, 25, 25])
+    big = _global_dp_align(src, tgt, 0.5, max_group=5, **kwargs)
+    pairs_big = [(s, t) for s, t, _, _ in big if s and t]
+    assert pairs_big == [([0], [0, 1, 2, 3])]
+
+    legacy = _global_dp_align(src, tgt, 0.5, max_group=3, **kwargs)
+    grouped = max((len(t) for _, t, _, _ in legacy if _), default=0)
+    assert grouped <= 3

@@ -151,7 +151,18 @@ class AlignmentConfig:
     # (0.1 / 0.02) overwhelm the ratio band and suppress gaps entirely (1:0
     # records collapse from 15 to 3 on the 6-chapter calibration set).
     gap_penalty: float = PENALTY_1_TO_0
-    multi_penalty: float = MULTI_SENTENCE_PENALTY
+    # 0.01 (down from the historical uniform 0.02): with the length-scaled
+    # penalty short attribution neighbours join groups nearly free either
+    # way, and 0.01 beat 0.02 on the DE->ZH recall audit (37 vs 34/59) at
+    # identical ZH->DE attribution quality.
+    multi_penalty: float = 0.01
+    # N:M group arity cap. 3 was the historical move set (1:1..3:1, 2:2);
+    # 5 is the judge-calibrated default: the DE->ZH recall audit (59-item
+    # LLM-judged sample) showed arity-5 grouping recovers formerly gapped DE
+    # sentences (gap stratum 0% -> 54% correct placement, overall sample
+    # 47% -> 64%) with no change on the ZH->DE attribution layer and no
+    # regression on stable pairs.
+    max_group: int = 5
     # --- Two-pass anchor-constrained DP (bertalign-style) --------------------
     # Pass 1 runs a 1:1-only skeleton DP; its records with margin >=
     # anchor_margin_min become fixed walls. Pass 2 runs the full move set
@@ -437,6 +448,7 @@ def _global_dp_align(
     one_to_one_only: bool = False,
     gap_penalty: float = PENALTY_1_TO_0,
     multi_penalty: float = MULTI_SENTENCE_PENALTY,
+    max_group: int = 3,
 ) -> list[tuple[list[int], list[int], float, float | None]]:
     """Global DP over all sentences, restricted to a diagonal band.
 
@@ -446,14 +458,14 @@ def _global_dp_align(
     tgt_idx_list) tuple — no duplicates because each sentence index is
     consumed by exactly one transition.
 
-    Pairing moves (1:1, 1:2, 2:1, 1:3, 3:1, 2:2) score the **mean pairwise
-    cosine over the cartesian product** of the consumed sentence groups, minus
-    :data:`MULTI_SENTENCE_PENALTY` per sentence beyond the 1:1 core. Mean —
-    not max-single-pair — scoring credits every sentence the move consumes:
-    under max scoring, a 1:1 on the best-matching half always dominates the
-    N:M that also covers the remaining halves, so partial-context alignments
-    (one DE segment mapped to only the dialogue OR only the narration half of
-    its ZH counterpart) win structurally.
+    Pairing moves (all (di, dj) with ``1 < di + dj <= max_group + 1``,
+    ``max_group=3`` giving the historical set 1:1, 1:2, 2:1, 1:3, 3:1, 2:2)
+    score the **mean pairwise cosine over the cartesian product** of the
+    consumed sentence groups, minus a length-scaled per-extra-sentence
+    penalty. Mean — not max-single-pair — scoring credits every sentence the
+    move consumes: under max scoring, a 1:1 on the best-matching half always
+    dominates the N:M that also covers the remaining halves, so
+    partial-context alignments win structurally.
 
     Each returned record carries a ``margin``: the score gap between the
     chosen move's path total and the best competing move at the same DP cell.
@@ -500,6 +512,20 @@ def _global_dp_align(
         deviation = abs(math.log((ls / lt) / length_mu))
         return length_penalty * max(0.0, deviation - length_tau)
 
+    def _scaled_extra(pi: int, i: int, pj: int, j: int) -> float:
+        """Extra-sentence penalty, scaled by sentence length. Short sentences
+        (attribution fragments like *sagte er*) join a group nearly free —
+        the judge audit found 47/182 attribution-layer pairs missing exactly
+        such a neighbour — while full-length sentences keep the whole
+        per-sentence discount that suppresses over-merging. Without length
+        arrays this degrades to the historical per-count penalty."""
+        e = 0.0
+        for k in range(pi + 1, i):
+            e += 1.0 if src_lens is None else min(1.0, src_lens[k] / 60.0)
+        for k in range(pj + 1, j):
+            e += 1.0 if tgt_lens is None else min(1.0, tgt_lens[k] / 60.0)
+        return e
+
     def _cands(i: int, j: int) -> list[tuple[int, int, float]]:
         """Feasible (di, dj, move_score) moves into cell (i, j)."""
         out: list[tuple[int, int, float]] = []
@@ -511,7 +537,16 @@ def _global_dp_align(
         # Pairing moves — mean pairwise similarity over the consumed block.
         # one_to_one_only restricts to (1,1): used as pass 1 of the two-pass
         # scheme, where the goal is a robust 1:1 skeleton, not coverage.
-        moves = ((1, 1),) if one_to_one_only else ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1), (2, 2))
+        # max_group=3 reproduces the historical move set (1:1..3:1, 2:2).
+        if one_to_one_only:
+            moves: tuple[tuple[int, int], ...] = ((1, 1),)
+        else:
+            moves = tuple(
+                (di, dj)
+                for di in range(1, max_group + 1)
+                for dj in range(1, max_group + 1)
+                if 1 < di + dj <= max_group + 1
+            )
         for di, dj in moves:
             pi, pj = i - di, j - dj
             if pi < 0 or pj < 0 or dp[pi, pj] <= NEG:
@@ -519,12 +554,11 @@ def _global_dp_align(
             s = float(sims[pi:i, pj:j].mean())
             if s < SIMILARITY_FLOOR:
                 continue
-            extra = (di - 1) + (dj - 1)
             out.append(
                 (
                     di,
                     dj,
-                    s - multi_penalty * extra - _length_prior(pi, i, pj, j),
+                    s - multi_penalty * _scaled_extra(pi, i, pj, j) - _length_prior(pi, i, pj, j),
                 )
             )
         return out
@@ -709,6 +743,7 @@ def align_segments(
         "ratio_k": config.ratio_k,
         "gap_penalty": config.gap_penalty,
         "multi_penalty": config.multi_penalty,
+        "max_group": config.max_group,
         **_lexical_prior_kwargs(src_texts, tgt_texts, config),
     }
     if config.two_pass:

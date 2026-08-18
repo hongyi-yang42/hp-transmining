@@ -77,7 +77,28 @@ class Alignment(BaseModel):
     align_id: str = Field(pattern=r"^a\d+$")
     en: list[str] = Field(description="List of English Segment IDs")
     zh: list[str] = Field(description="List of Chinese Segment IDs")
-    type: Literal["1:0", "0:1", "1:1", "1:2", "2:1", "1:3", "3:1", "2:2"]
+    # Grouping types up to arity 5 (max_group): the DP emits any
+    # di:dj with 1 < di + dj <= max_group + 1; the Literal is the superset
+    # for the largest supported cap (AlignmentConfig.max_group, default 5).
+    type: Literal[
+        "1:0",
+        "0:1",
+        "1:1",
+        "1:2",
+        "2:1",
+        "1:3",
+        "3:1",
+        "2:2",
+        "1:4",
+        "4:1",
+        "2:3",
+        "3:2",
+        "1:5",
+        "5:1",
+        "2:4",
+        "4:2",
+        "3:3",
+    ]
     confidence: float = Field(ge=0.0, le=1.0)
     # Score gap between the chosen DP move's path total and the best competing
     # move at the same cell. Absolute cosine confidence is not discriminative
