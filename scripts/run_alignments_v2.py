@@ -49,7 +49,7 @@ DEFAULT_CHAPTERS = (1, 2, 3)
 MIN_CHAPTER = 1
 MAX_CHAPTER = 17
 PAIRS = (("de", "en"), ("de", "zh"), ("en", "zh"))
-MODEL_NAME = "intfloat/multilingual-e5-base"
+MODEL_NAME = "models/LaBSE"  # canonical since 2026-08-18 judge audit; e5 runs: set gap 0.1
 
 
 def validate_chapters(values: list[int]) -> tuple[tuple[int, ...], str | None]:
@@ -160,7 +160,7 @@ def run_one(src_lang: str, tgt_lang: str, chapter: int, force: bool) -> dict[str
         embed_cache_dir=EMBED_DIR,
         model_name=MODEL_NAME,
         force_recompute=force,
-    )
+    )  # gap/multi penalties + arity come from AlignmentConfig defaults
     alignments = align_segments(src, tgt, cfg)
 
     # Write alignment JSONL to BOTH the canonical data/aligned/ path (used by
@@ -202,6 +202,7 @@ def run_one(src_lang: str, tgt_lang: str, chapter: int, force: bool) -> dict[str
         "embedding_cache": {
             "schema_version": "v2",
             "model_name": MODEL_NAME,
+            "gap_penalty": cfg.gap_penalty,
             "src_scope": src_scope,
             "tgt_scope": tgt_scope,
             "src_cache_digest": src_cache_digest,

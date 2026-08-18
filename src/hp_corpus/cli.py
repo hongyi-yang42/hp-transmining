@@ -296,9 +296,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_align.add_argument(
         "--model",
-        default="intfloat/multilingual-e5-base",
-        help="sentence-transformers model name (default: e5-base ~1.1GB; "
-        "fallback: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 ~470MB)",
+        default="models/LaBSE",
+        help="sentence-transformers model name or local path (canonical "
+        "default: LaBSE under models/; historical runs used "
+        "intfloat/multilingual-e5-base with --gap-penalty 0.1)",
     )
     p_align.add_argument(
         "--band",

@@ -104,13 +104,15 @@ class AlignmentConfig:
     embed_cache_dir: Path
     vecalign_dir: Path | None = None  # reserved for future subprocess use; currently unused
     manual_threshold: float = MANUAL_CONFIDENCE_THRESHOLD
-    # Default to multilingual-e5-base: empirically produces much higher-quality
-    # EN–ZH alignment than the smaller MiniLM (mean conf 0.78 vs 0.66 on
-    # Chapter 1, with 0 records below the 0.5 manual-review threshold vs 36).
-    # Caveat: e5's confidence is less discriminative (all pairs score >0.69),
-    # so for review workflows consider running with both models and flagging
-    # pairs where they disagree.
-    model_name: str = "intfloat/multilingual-e5-base"
+    # Canonical embedding model: LaBSE (local checkout under models/LaBSE,
+    # downloaded from the ModelScope mirror; gitignored). Judge-audited on a
+    # ch1-17 random gold standard (data/derived/alignment_metric_review/):
+    # ZH<->DE acceptable 96.7% / strict DE->ZH 96% vs e5-base 64.7% / 70%.
+    # LaBSE's cosines are NOT compressed the way e5's are, which is exactly
+    # why it wins here — but it also means the penalties below must be on
+    # LaBSE's scale (see gap_penalty). To reproduce the historical e5 runs:
+    # model_name="intfloat/multilingual-e5-base", gap_penalty=0.1.
+    model_name: str = "models/LaBSE"
     locality_band: float = DEFAULT_LOCALITY_BAND
     # When True, recompute embeddings even if a cache file with matching digest
     # exists. Useful for forcing a clean re-encode after model upgrades or
@@ -145,12 +147,14 @@ class AlignmentConfig:
     # inflates its denominator and the ratio criterion separates the two.
     similarity_mode: str = "cosine"
     ratio_k: int = 4
-    # Gap / multi-sentence penalties, configurable because the ratio mode's
-    # squashed score band (≈0.03 between true and wrong pairs) is narrower
-    # than cosine's (≈0.05-0.2): penalties calibrated on the cosine scale
-    # (0.1 / 0.02) overwhelm the ratio band and suppress gaps entirely (1:0
-    # records collapse from 15 to 3 on the 6-chapter calibration set).
-    gap_penalty: float = PENALTY_1_TO_0
+    # Gap / multi-sentence penalties, configurable because the penalty scale
+    # is model-dependent: e5 compresses all cosines above ~0.69 (cheap gaps
+    # at 0.1 were right), while LaBSE spreads wrong pairs far below true
+    # ones, so a cheap gap penalty makes the DP refuse weak pairs en masse
+    # (1:0/0:1 exploded to 159/70 on the 6-chapter calibration set). 0.18 is
+    # the judge-calibrated value for LaBSE — the canonical default. e5 runs
+    # should set 0.1; the ratio mode's squashed band needs ~0.03.
+    gap_penalty: float = 0.18
     # 0.01 (down from the historical uniform 0.02): with the length-scaled
     # penalty short attribution neighbours join groups nearly free either
     # way, and 0.01 beat 0.02 on the DE->ZH recall audit (37 vs 34/59) at

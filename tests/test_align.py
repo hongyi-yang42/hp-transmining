@@ -580,7 +580,10 @@ def test_default_config_keeps_new_modes_off() -> None:
     cfg = AlignmentConfig(embed_cache_dir=Path("/tmp/x"))
     assert cfg.similarity_mode == "cosine"
     assert cfg.two_pass is False
-    # Judge-calibrated defaults: arity-5 grouping + softened multi penalty.
+    # Judge-calibrated canonical defaults: LaBSE + its gap scale + arity-5
+    # grouping + softened multi penalty.
+    assert cfg.model_name == "models/LaBSE"
+    assert cfg.gap_penalty == 0.18
     assert cfg.max_group == 5
     assert cfg.multi_penalty == 0.01
 
