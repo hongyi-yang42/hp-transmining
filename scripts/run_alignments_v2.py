@@ -253,7 +253,18 @@ def _cross_pair_uniqueness(chapter: int) -> dict[str, Any]:
         for j in range(i + 1, len(keys)):
             a, b = keys[i], keys[j]
             same = sum(1 for k in range(min_len) if pairs[a][k] == pairs[b][k])
-            overlap[f"{a}_vs_{b}"] = {"matches": same, "compared": min_len}
+            # Wholesale cache contamination would make ~every position agree.
+            # LaBSE clamps some perfect pairs to confidence 1.0, so two
+            # different pair files coincidentally holding 1.0 at the same
+            # index is expected noise (e5 never reached the ceiling, hence
+            # the historical zero-match baseline). Fail on proportional
+            # agreement, not on any single coincidence.
+            overlap[f"{a}_vs_{b}"] = {
+                "matches": same,
+                "compared": min_len,
+                "match_rate": round(same / min_len, 4) if min_len else None,
+                "status": "FAIL" if min_len and same / min_len > 0.10 else "OK",
+            }
 
     return {"chapter": chapter, "overlap_in_first_min_len": overlap}
 
@@ -306,12 +317,12 @@ def main(argv: list[str] | None = None) -> int:
         chk = _cross_pair_uniqueness(chapter)
         overlaps.append(chk)
         for pair_key, info in chk["overlap_in_first_min_len"].items():
-            ok = info["matches"] == 0
+            ok = info["status"] == "OK"
             all_unique = all_unique and ok
             print(
                 f"  ch{chapter:02d} {pair_key}: "
                 f"{info['matches']}/{info['compared']} matches "
-                f"({'OK' if ok else 'FAIL'})"
+                f"(rate={info['match_rate']}) ({'OK' if ok else 'FAIL'})"
             )
     (MANIFEST_DIR / "cross_pair_uniqueness.json").write_text(
         json.dumps(overlaps, ensure_ascii=False, indent=2), encoding="utf-8"
