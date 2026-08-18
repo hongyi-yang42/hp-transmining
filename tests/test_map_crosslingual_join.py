@@ -16,9 +16,7 @@ from pathlib import Path
 
 from hp_corpus.crosslingual_map import index_blocks_by_segment
 
-SCRIPT_PATH = (
-    Path(__file__).resolve().parent.parent / "scripts" / "map_crosslingual_pps.py"
-)
+SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "map_crosslingual_pps.py"
 
 
 def _load_script():
@@ -57,6 +55,12 @@ ZH_CONLLU = (
     "# text = synth zh\n"
     "1\t在\t在\tADP\tADP\t_\t2\tcase\t_\t_\n"
     "2\t屋\t屋\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+    "\n"
+    "# sent_id = hp1_zh_ch01_p0001_s002#b001\n"
+    "# source_segment_id = hp1_zh_ch01_p0001_s002\n"
+    "# text = synth zh neighbour\n"
+    "1\t在\t在\tADP\tADP\t_\t2\tcase\t_\t_\n"
+    "2\t山\t山\tNOUN\tNN\t_\t0\troot\t_\t_\n"
     "\n"
 )
 
@@ -148,6 +152,59 @@ def test_unresolvable_alignment_id_is_counted_not_dropped(tmp_path: Path) -> Non
     assert record["n_zh_alignment_ids_unresolved"] == 1
     assert record["en_status"] == "unmappable"
     assert record["zh_status"] == "unmappable"
+
+
+def test_context_window_searches_neighbour_and_marks_provenance(tmp_path: Path) -> None:
+    """With ``zh_context_ids`` present the PP search covers the neighbour
+    sentence too, and every proposal records which segment it came from —
+    a PP living in a context (non-anchor) sentence is found and flagged,
+    not silently missed."""
+    script = _load_script()
+    parsed = _write_parsed(tmp_path)
+
+    en_by_segment = index_blocks_by_segment(script._load_parsed_chapters(parsed, "en", [1]))
+    zh_parsed = script._load_parsed_chapters(parsed, "zh", [1])
+    zh_by_segment = index_blocks_by_segment(zh_parsed)
+    zh_block_to_segment = {b.sent_id: b.source_segment_id for b in zh_parsed.values()}
+
+    cand = _cand(["hp1_en_ch01_p0001_s001"], ["hp1_zh_ch01_p0001_s001"])
+    cand["zh_context_ids"] = ["hp1_zh_ch01_p0001_s001", "hp1_zh_ch01_p0001_s002"]
+
+    record = script.build_mapping_record(
+        cand, en_by_segment, zh_by_segment, {}, zh_block_to_segment
+    )
+    # Both the anchor and the neighbour sentence were searched.
+    assert record["n_zh_sentences_seen"] == 2
+    assert record["zh_context_ids"] == [
+        "hp1_zh_ch01_p0001_s001",
+        "hp1_zh_ch01_p0001_s002",
+    ]
+    # The neighbour's PP (在山) is among the proposals, with provenance.
+    alt_sources = {a["source_segment_id"] for a in record["zh_alternatives"]}
+    assert "hp1_zh_ch01_p0001_s002" in alt_sources
+    surfaces = {a["pp"]["span_text"] for a in record["zh_alternatives"]}
+    assert "在 山" in surfaces
+    # best-in-anchor flag agrees with the best PP's actual origin.
+    best_src = zh_block_to_segment.get(record["zh_best"]["sent_id"])
+    assert record["zh_best_in_anchor"] == (best_src == "hp1_zh_ch01_p0001_s001")
+
+
+def test_legacy_candidates_without_context_ids_search_anchor_only(tmp_path: Path) -> None:
+    """Candidates built before the window feature (no ``zh_context_ids``)
+    keep the historical anchor-only search — byte-compatible behaviour."""
+    script = _load_script()
+    parsed = _write_parsed(tmp_path)
+
+    en_by_segment = index_blocks_by_segment(script._load_parsed_chapters(parsed, "en", [1]))
+    zh_by_segment = index_blocks_by_segment(script._load_parsed_chapters(parsed, "zh", [1]))
+
+    record = script.build_mapping_record(
+        _cand(["hp1_en_ch01_p0001_s001"], ["hp1_zh_ch01_p0001_s001"]),
+        en_by_segment,
+        zh_by_segment,
+    )
+    assert record["n_zh_sentences_seen"] == 1
+    assert record["zh_context_ids"] == ["hp1_zh_ch01_p0001_s001"]
 
 
 def test_load_parsed_chapters_fails_closed_on_block_id_collision(tmp_path: Path) -> None:

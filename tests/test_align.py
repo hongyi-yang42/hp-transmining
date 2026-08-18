@@ -27,6 +27,8 @@ from hp_corpus.align import (
     _build_cache_identity,
     _global_dp_align,
     _lang_of_segments,
+    _ratio_transform,
+    _two_pass_align,
     embed_sentences,
 )
 from hp_corpus.schema import Alignment, Segment
@@ -67,13 +69,7 @@ def fake_encoder(monkeypatch):
 
         def encode(self, inputs, **kwargs):  # type: ignore[no-untyped-def]
             return np.array(
-                [
-                    [
-                        float((hash(s + f"|{i}") % 1000) / 1000.0)
-                        for i in range(4)
-                    ]
-                    for s in inputs
-                ],
+                [[float((hash(s + f"|{i}") % 1000) / 1000.0) for i in range(4)] for s in inputs],
                 dtype=np.float32,
             )
 
@@ -226,9 +222,7 @@ def test_de_en_and_de_zh_use_different_target_caches(
     assert not list((tmp_path / "v2" / "zh").rglob("*hp1_en*"))
 
 
-def test_different_chapters_use_different_caches(
-    tmp_path: Path, fake_encoder
-) -> None:
+def test_different_chapters_use_different_caches(tmp_path: Path, fake_encoder) -> None:
     """Requirement 9: chapter 1 and chapter 2 of the same language must not
     share a cache file. Different segment counts/IDs → different digests."""
     ids_ch01 = _ids("de", 1, 3)
@@ -346,3 +340,340 @@ def test_alignment_schema_margin_optional_for_old_records() -> None:
         margin=0.12,
     )
     assert rec2.margin == pytest.approx(0.12)
+
+
+# --------------------------------------------------------------------- lexical prior
+
+
+def _norm2(v: tuple[float, float]) -> np.ndarray:
+    arr = np.array([v], dtype=np.float64)
+    return arr / np.linalg.norm(arr)
+
+
+def _norm3(v: tuple[float, float, float]) -> np.ndarray:
+    arr = np.array([v], dtype=np.float64)
+    return arr / np.linalg.norm(arr)
+
+
+def test_dp_anchor_bonus_flips_shifted_pairing() -> None:
+    """Shift scenario (the real residual error class — a monotone DP cannot
+    cross): plain sims favour s0↔t0 + s1↔t1 with t2 gapped; an anchor bonus
+    on the true cells (s0↔t1, s1↔t2, t0 untranslatable) must flip the DP."""
+    src = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    tgt = np.vstack(
+        [
+            _norm3((0.8, 0.6, 0.6)),  # t0: attractive nuisance for s0
+            _norm3((0.7, 0.8, 0.3)),  # t1: s0's true partner
+            _norm3((0.6, 0.7, 0.5)),  # t2: s1's true partner
+        ]
+    )
+    bonus = np.array([[0.0, 0.25, 0.0], [0.0, 0.0, 0.25]])
+    matches = _global_dp_align(src, tgt, 0.5, bonus=bonus)
+    pairs = {(s[0], t[0]) for s, t, _, _ in matches if s and t}
+    assert (0, 1) in pairs and (1, 2) in pairs
+    # Without the bonus the DP takes the shifted pairing (regression contrast)
+    matches_plain = _global_dp_align(src, tgt, 0.5)
+    pairs_plain = {(s[0], t[0]) for s, t, _, _ in matches_plain if s and t}
+    assert (0, 0) in pairs_plain and (1, 1) in pairs_plain
+
+
+def test_dp_length_prior_rejects_imbalanced_pairing() -> None:
+    """A 5-char src sentence has sim 0.75 with a 45-char tgt and 0.72 with a
+    5-char tgt. Without the prior the DP takes the higher sim; with it, the
+    extreme length ratio tips the balance to the balanced candidate."""
+    src = np.array([[1.0, 0.0]])
+    t0 = _norm2((0.75, 0.66))  # long, slightly higher sim
+    t1 = _norm2((0.72, 0.69))
+    tgt = np.vstack([t0, t1])
+    matches = _global_dp_align(
+        src,
+        tgt,
+        0.5,
+        src_lens=[5],
+        tgt_lens=[45, 5],
+        length_mu=3.45,
+        length_tau=1.1,
+        length_penalty=0.1,
+    )
+    pairs = {(s[0], t[0]) for s, t, _, _ in matches if s and t}
+    assert pairs == {(0, 1)}
+
+
+def test_lexical_prior_kwargs_disabled_is_empty() -> None:
+    """use_lexical_prior=False must leave the DP inputs untouched."""
+    from pathlib import Path
+
+    from hp_corpus.align import AlignmentConfig, _lexical_prior_kwargs
+
+    cfg = AlignmentConfig(embed_cache_dir=Path("/tmp/x"), use_lexical_prior=False)
+    assert _lexical_prior_kwargs(["a"], ["b"], cfg) == {}
+    cfg_on = AlignmentConfig(embed_cache_dir=Path("/tmp/x"))
+    kwargs = _lexical_prior_kwargs(["Hermine kam.", "Niemand."], ["赫敏来了。", "无人。"], cfg_on)
+    assert set(kwargs) == {
+        "bonus",
+        "src_lens",
+        "tgt_lens",
+        "length_mu",
+        "length_tau",
+        "length_penalty",
+    }
+    # The shared rare anchor produced a positive bonus on the matching cell.
+    assert kwargs["bonus"][0, 0] > 0.0
+    assert kwargs["bonus"][0, 1] == 0.0
+
+
+# --------------------------------------------------------------------- ratio mode
+#
+# Artetxe & Schwenk (2019) margin criterion: score each cosine against the
+# mean of its top-k neighbours on each side. Targets that every src sentence
+# likes (crowded dialogue lines) get discounted; distinctive pairs stand out.
+
+
+def test_ratio_transform_hand_computed() -> None:
+    sims = np.array([[0.9, 0.7], [0.5, 0.8]])
+    out = _ratio_transform(sims, 1)
+    # k=1: fwd = row max = [0.9, 0.8]; bwd = col max = [0.9, 0.8].
+    # r[0,0]=1.0, r[1,1]=1.0 -> 0.5; r[0,1]=0.7/0.85; r[1,0]=0.5/0.85.
+    assert out[0, 0] == pytest.approx(0.5)
+    assert out[1, 1] == pytest.approx(0.5)
+    assert out[0, 1] == pytest.approx((0.7 / 0.85) / (1 + 0.7 / 0.85))
+    assert out[1, 0] == pytest.approx((0.5 / 0.85) / (1 + 0.5 / 0.85))
+
+
+def _unitv(v: tuple[float, ...]) -> np.ndarray:
+    arr = np.array([v], dtype=np.float64)
+    return arr / np.linalg.norm(arr)
+
+
+def _crowd_filler_fixture() -> tuple[np.ndarray, np.ndarray]:
+    """3 src x 2 tgt. Truth: s1<->t0, s2<->t1, s0 untranslatable. s0 is a
+    "crowd member" (likes both targets ~equally) and steals t0 from s1 under
+    raw cosine (t0's true partner s1 is then gapped); under the ratio
+    criterion s1<->t0 wins because fwd(s1) is low (s1's other option is a
+    mere 0.60) while fwd(s0) is high (0.795).
+
+    Hand-derived geometry giving cos(s0,t0)=0.80, cos(s0,t1)=0.79,
+    cos(s1,t0)=0.78, cos(s1,t1)=0.60, cos(s2,t0)=0.50, cos(s2,t1)=0.78.
+    A length prior (mu=3.45, tau=0.3, penalty=0.5, lens 59/17) keeps the 1:1s
+    in-band and blocks N:M absorption so the cosine-mode error is clean."""
+    src = np.vstack(
+        [
+            _unitv((0.80, 0.322044, 0.506249)),
+            _unitv((0.78, 0.075617, 0.621193)),
+            _unitv((0.50, 0.602129, 0.622448)),
+        ]
+    )
+    tgt = np.vstack([_unitv((1.0, 0.0, 0.0)), _unitv((0.7, 0.714143, 0.0))])
+    return src, tgt
+
+
+_CROWD_LEN_KWARGS = {
+    "src_lens": [59, 59, 59],
+    "tgt_lens": [17, 17],
+    "length_mu": 3.45,
+    "length_tau": 0.3,
+    "length_penalty": 0.5,
+}
+
+
+def test_ratio_mode_dp_flips_crowd_filler_shift() -> None:
+    src, tgt = _crowd_filler_fixture()
+    # Cosine mode: crowd member s0 steals t0 (0.80 > 0.78) and s0's rival
+    # s1 — t0's true partner — is left gapped.
+    plain = _global_dp_align(src, tgt, 0.5, **_CROWD_LEN_KWARGS)
+    pairs_plain = {(s[0], t[0]) for s, t, _, _ in plain if s and t}
+    assert pairs_plain == {(0, 0), (2, 1)}
+    assert any(s == [1] and not t for s, t, _, _ in plain)
+    # Ratio mode: s1's low fwd (weak alternatives) makes s1<->t0 the
+    # distinctive pair; the crowd member loses t0.
+    ratio = _global_dp_align(src, tgt, 0.5, similarity_mode="ratio", ratio_k=4, **_CROWD_LEN_KWARGS)
+    pairs_ratio = {(s[0], t[0]) for s, t, _, _ in ratio if s and t}
+    assert pairs_ratio == {(1, 0), (2, 1)}
+    # s0 correctly left unaligned in ratio mode.
+    assert any(s == [0] and not t for s, t, _, _ in ratio)
+
+
+def test_dp_rejects_unknown_similarity_mode() -> None:
+    src, tgt = _crowd_filler_fixture()
+    with pytest.raises(ValueError, match="unknown similarity_mode"):
+        _global_dp_align(src, tgt, 0.5, similarity_mode="dot")
+
+
+# --------------------------------------------------------------------- two-pass
+#
+# Pass 1 = 1:1-only skeleton DP; high-margin 1:1s become walls; pass 2 = full
+# move set between walls.
+
+
+def test_two_pass_fallback_matches_single_pass() -> None:
+    """With an unreachable anchor threshold there is no skeleton, and the
+    result must be bit-identical to the plain single-pass DP."""
+    rng = np.random.default_rng(11)
+    src = rng.normal(size=(6, 5))
+    tgt = rng.normal(size=(7, 5))
+    single = _global_dp_align(src, tgt, 0.5)
+    two = _two_pass_align(src, tgt, 0.5, anchor_margin_min=1e6)
+    assert two == single
+
+
+def test_two_pass_identity_fixture_all_anchors() -> None:
+    """Perfectly orthogonal identity geometry: every diagonal cell is a
+    high-margin 1:1 anchor; output is the four 1:1 records, and every
+    sentence index is consumed exactly once (partition invariant)."""
+    eye = np.eye(4)
+    out = _two_pass_align(eye, eye.copy(), 0.5, anchor_margin_min=0.4)
+    assert [(s, t) for s, t, _, _ in out if s and t] == [([i], [i]) for i in range(4)]
+    consumed_src = [i for s, _, _, _ in out for i in s]
+    consumed_tgt = [j for _, t, _, _ in out for j in t]
+    assert sorted(consumed_src) == list(range(4))
+    assert sorted(consumed_tgt) == list(range(4))
+
+
+def test_two_pass_one_sided_interval_emits_gap_record() -> None:
+    """A trailing target sentence after the last anchor (nothing pairs with
+    it) must surface as a 0:1 record, not be silently dropped: sub-DPs reject
+    empty matrices, so one-sided intervals are emitted directly."""
+    src = np.vstack([_unitv((1, 0, 0)), _unitv((0, 1, 0))])
+    tgt = np.vstack([_unitv((1, 0, 0)), _unitv((0, 1, 0)), _unitv((0.5, 0.5, 0.7071068))])
+    out = _two_pass_align(src, tgt, 0.5, anchor_margin_min=0.4)
+    records = [(tuple(s), tuple(t)) for s, t, _, _ in out]
+    assert records == [((0,), (0,)), ((1,), (1,)), ((), (2,))]
+    gap_rec = [r for r in out if r[0] == [] and r[1] == [2]][0]
+    assert gap_rec[2] == 0.0
+    assert gap_rec[3] is None
+
+
+def test_two_pass_slices_bonus_into_intervals() -> None:
+    """The anchor skeleton is (0,0) and (4,4); the interior 3x3 block is
+    mutually orthogonal (cos 0, floor-blocked). A bonus at global cell (2,3)
+    must reach the interval DP at its local offset (1,2) — proving bonus
+    slicing — and produce the s2<->t3 pairing only when the bonus is present.
+
+    Geometry: src = [e0, e1, e2, e3, e7], tgt = [e0, e4, e5, e6, e7] in 8D.
+    Pass-1 takes the s2<->t3 bonus pairing but its margin (0.3) sits below
+    anchor_margin_min=0.4, so the interior stays one interval."""
+    src = np.eye(8)[[0, 1, 2, 3, 7]]
+    tgt = np.eye(8)[[0, 4, 5, 6, 7]]
+    bonus = np.zeros((5, 5))
+    bonus[2, 3] = 0.5
+
+    def _records(b: np.ndarray | None) -> set[tuple[tuple[int, ...], tuple[int, ...]]]:
+        out = _two_pass_align(src, tgt, 0.5, anchor_margin_min=0.4, bonus=b)
+        return {(tuple(s), tuple(t)) for s, t, _, _ in out}
+
+    with_bonus = _records(bonus)
+    without = _records(None)
+    # Anchors are preserved verbatim in both runs.
+    assert ((0,), (0,)) in with_bonus and ((4,), (4,)) in with_bonus
+    assert ((0,), (0,)) in without and ((4,), (4,)) in without
+    # The sliced bonus pairs s2<->t3 inside the interval; without it the
+    # whole interior is gapped (floor-blocked cosines).
+    assert ((2,), (3,)) in with_bonus
+    assert ((2,), (3,)) not in without
+    interior_pairs_without = {p for p in without if p[0] and p[1]} - {((0,), (0,)), ((4,), (4,))}
+    assert interior_pairs_without == set()
+
+
+def test_default_config_keeps_new_modes_off() -> None:
+    from hp_corpus.align import AlignmentConfig
+
+    cfg = AlignmentConfig(embed_cache_dir=Path("/tmp/x"))
+    assert cfg.similarity_mode == "cosine"
+    assert cfg.two_pass is False
+    # Judge-calibrated canonical defaults: LaBSE + its gap scale + arity-5
+    # grouping + softened multi penalty.
+    assert cfg.model_name == "models/LaBSE"
+    assert cfg.gap_penalty == 0.18
+    assert cfg.max_group == 5
+    assert cfg.multi_penalty == 0.01
+
+
+# --------------------------------------------------------------------- grouping
+#
+# max_group arity expansion + length-scaled multi-sentence penalty: the judge
+# audit showed 43% of ZH sentences map to >1 DE sentence (8% to >=4) and 47
+# pairs miss exactly one short attribution neighbour.
+
+
+def test_move_enumeration_reproduces_legacy_set_at_three() -> None:
+    def enumerate_moves(mg: int) -> set[tuple[int, int]]:
+        return {
+            (di, dj) for di in range(1, mg + 1) for dj in range(1, mg + 1) if 1 < di + dj <= mg + 1
+        }
+
+    assert enumerate_moves(3) == {
+        (1, 1),
+        (1, 2),
+        (2, 1),
+        (1, 3),
+        (3, 1),
+        (2, 2),
+    }
+    assert enumerate_moves(4) == enumerate_moves(3) | {
+        (1, 4),
+        (4, 1),
+        (2, 3),
+        (3, 2),
+    }
+    assert enumerate_moves(5) == enumerate_moves(4) | {
+        (1, 5),
+        (5, 1),
+        (2, 4),
+        (4, 2),
+        (3, 3),
+    }
+
+
+def test_short_attribution_neighbour_joins_group_nearly_free() -> None:
+    """One src sentence, tgt = [true partner (0.90), neighbour (0.74)].
+    With multi_penalty=0.05: a short (15-char) neighbour joins the group
+    (mean 0.82 - 0.0125 > 0.90 - 0.1); a full-length (60+ char) neighbour
+    does not (0.82 - 0.05 < 0.80)."""
+    src = np.array([[1.0, 0.0]])
+    t_main = _unitv((0.90, 0.436))
+    t_extra = _unitv((0.74, 0.672))
+    tgt = np.vstack([t_main, t_extra])
+    # Lengths follow the corpus de/zh char ratio (mu=3.45) so the length
+    # prior stays quiet and the multi-penalty scaling is what decides.
+    joined = _global_dp_align(
+        src,
+        tgt,
+        0.5,
+        src_lens=[100],
+        tgt_lens=[29, 4],
+        multi_penalty=0.05,
+    )
+    assert [(s, t) for s, t, _, _ in joined if s and t] == [([0], [0, 1])]
+
+    rejected = _global_dp_align(
+        src,
+        tgt,
+        0.5,
+        src_lens=[100],
+        tgt_lens=[29, 25],
+        multi_penalty=0.05,
+    )
+    assert [(s, t) for s, t, _, _ in rejected if s and t] == [([0], [0])]
+    assert any(s == [] and t == [1] for s, t, _, _ in rejected)
+
+
+def test_max_group_five_expresses_one_to_four_group() -> None:
+    """Four target sentences all close to the src (sims ~0.9): with
+    max_group=5 the DP takes a single 1:4 group; with the legacy cap of 3
+    it cannot, and at least one target must be left out."""
+    rng = np.random.default_rng(3)
+    base = rng.normal(size=8)
+    src = np.array([base / np.linalg.norm(base)])
+    offsets = [rng.normal(scale=0.25, size=8) for _ in range(4)]
+    tgt = np.vstack([(base + o) / np.linalg.norm(base + o) for o in offsets])
+    tgt_sims = (src @ tgt.T).ravel()
+    assert tgt_sims.min() > 0.85  # all four are genuinely close
+
+    kwargs = dict(src_lens=[100], tgt_lens=[25, 25, 25, 25])
+    big = _global_dp_align(src, tgt, 0.5, max_group=5, **kwargs)
+    pairs_big = [(s, t) for s, t, _, _ in big if s and t]
+    assert pairs_big == [([0], [0, 1, 2, 3])]
+
+    legacy = _global_dp_align(src, tgt, 0.5, max_group=3, **kwargs)
+    grouped = max((len(t) for _, t, _, _ in legacy if _), default=0)
+    assert grouped <= 3

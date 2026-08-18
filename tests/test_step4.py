@@ -477,6 +477,52 @@ def test_one_to_one_alignment_carried_through(tmp_path: Path) -> None:
     assert cand["zh_aligned_text"] == "synth ZH four"
 
 
+def test_context_window_expands_anchor_and_is_hash_invisible(tmp_path: Path) -> None:
+    """``zh_context_ids/text`` are the retrieval view (anchor ±1 in corpus
+    order); the anchor columns keep partition semantics, and
+    ``source_row_sha256`` — which covers SOURCE_COLUMNS only — must not
+    change when context values change (existing annotation bindings stay
+    valid)."""
+    from hp_corpus.step4 import (
+        ALL_TSV_COLUMNS,
+        CONTEXT_COLUMNS,
+        SOURCE_COLUMNS,
+        compute_source_row_sha256,
+    )
+
+    paths = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=paths["extraction_dir"],
+        segmented_dir=paths["segmented_dir"],
+        aligned_dir=paths["aligned_dir"],
+        chapters=[1],
+    )
+    cand = next(
+        c
+        for c in candidates
+        if c["de_source_segment_id"] == "hp1_de_ch01_p0003_s001" and c["de_form"] == "uncontracted"
+    )
+    # Anchor unchanged; window = anchor ±1 in corpus order.
+    assert cand["zh_sentence_ids"] == ["hp1_zh_ch01_p0004_s001"]
+    assert cand["zh_context_ids"] == [
+        "hp1_zh_ch01_p0003_s001",
+        "hp1_zh_ch01_p0004_s001",
+        "hp1_zh_ch01_p0005_s001",
+    ]
+    assert cand["zh_context_text"] == "synth ZH three synth ZH four synth ZH five"
+    # Context columns sit between SOURCE and EDITABLE in the TSV layout.
+    assert ALL_TSV_COLUMNS == SOURCE_COLUMNS + CONTEXT_COLUMNS + tuple(
+        c for c in ALL_TSV_COLUMNS if c not in SOURCE_COLUMNS + CONTEXT_COLUMNS
+    )
+    assert "zh_context_ids" not in SOURCE_COLUMNS
+    # Hash is computed over SOURCE_COLUMNS only: context edits are invisible.
+    h = compute_source_row_sha256(cand)
+    mutated = dict(cand)
+    mutated["zh_context_ids"] = []
+    mutated["zh_context_text"] = ""
+    assert compute_source_row_sha256(mutated) == h
+
+
 def test_one_to_two_alignment_preserved(tmp_path: Path) -> None:
     paths = _build_synth_repo(tmp_path)
     candidates = build_candidates(
@@ -784,8 +830,21 @@ def test_paper_shared_prepositions_constant() -> None:
     # gegen, hinter, in, über, unter, von, zu. Excluded: um/vor (not in
     # the uncontracted PREPOSITIONS list).
     assert PAPER_SHARED_PREPOSITIONS == frozenset(
-        {"an", "auf", "aus", "bei", "durch", "für", "gegen",
-         "hinter", "in", "über", "unter", "von", "zu"}
+        {
+            "an",
+            "auf",
+            "aus",
+            "bei",
+            "durch",
+            "für",
+            "gegen",
+            "hinter",
+            "in",
+            "über",
+            "unter",
+            "von",
+            "zu",
+        }
     )
 
 
@@ -813,8 +872,8 @@ def test_select_paper_sample_keeps_shared_drops_rest() -> None:
         _cand("an", "uncontracted"),
         _cand("aus", "uncontracted"),  # aus IS shared (ausm → aus)
         # Not shared — dropped.
-        _cand("um", "contracted"),    # um not in uncontracted list
-        _cand("vor", "contracted"),   # vor not in uncontracted list
+        _cand("um", "contracted"),  # um not in uncontracted list
+        _cand("vor", "contracted"),  # vor not in uncontracted list
     ]
     selected, summary = select_paper_sample(candidates)
     kept_norms = sorted(c["de_prep_normalized"] for c in selected)
@@ -879,8 +938,7 @@ def test_select_paper_sample_tolerates_unknown_de_form() -> None:
     # does not appear (the unknown_form candidate was dropped by prep, not
     # by form). The drop is recorded under the unknown key.
     assert summary["by_form"] == {"contracted": 1, "uncontracted": 0}
-    assert summary["dropped_by_form"] == {"contracted": 0, "uncontracted": 0,
-                                          "unknown_form": 1}
+    assert summary["dropped_by_form"] == {"contracted": 0, "uncontracted": 0, "unknown_form": 1}
 
 
 def test_vorm_normalizes_to_vor() -> None:
@@ -914,8 +972,21 @@ def test_inventory_remains_thirteen_prepositions() -> None:
     """The eligibility filter still has exactly the 13 canonical paired
     prepositions — not expanded."""
     assert PAPER_SHARED_PREPOSITIONS == frozenset(
-        {"an", "auf", "aus", "bei", "durch", "für", "gegen",
-         "hinter", "in", "über", "unter", "von", "zu"}
+        {
+            "an",
+            "auf",
+            "aus",
+            "bei",
+            "durch",
+            "für",
+            "gegen",
+            "hinter",
+            "in",
+            "über",
+            "unter",
+            "von",
+            "zu",
+        }
     )
     assert len(PAPER_SHARED_PREPOSITIONS) == 13
 
@@ -945,9 +1016,7 @@ def test_contracted_table_parity_with_published_inventory() -> None:
     for form, expected in pairs:
         assert form in CONTRACTED_PREP_NORMALIZATION, f"missing from table: {form}"
         actual = normalize_contracted_prep(form)
-        assert actual == expected, (
-            f"{form} normalizes to {actual!r}, fixture says {expected!r}"
-        )
+        assert actual == expected, f"{form} normalizes to {actual!r}, fixture says {expected!r}"
 
 
 def test_contracted_table_parity_with_vendor() -> None:
@@ -1042,10 +1111,20 @@ def test_build_candidates_fails_on_header_only_tsv(tmp_path: Path) -> None:
     paths = _build_synth_repo(tmp_path)
     # Overwrite with a header-only file.
     from hp_corpus.step4 import SOURCE_COLUMNS as _SC  # noqa: F401 (sanity)
+
     fields = [
-        "parse_block_id", "source_segment_id", "prep", "det", "noun",
-        "prep_token_id", "det_token_id", "noun_token_id",
-        "pp_token_start", "pp_token_end", "pp_surface", "in_filter",
+        "parse_block_id",
+        "source_segment_id",
+        "prep",
+        "det",
+        "noun",
+        "prep_token_id",
+        "det_token_id",
+        "noun_token_id",
+        "pp_token_start",
+        "pp_token_end",
+        "pp_surface",
+        "in_filter",
     ]
     with open(paths["extraction_dir"] / "hp1_de_ch01_contracted.tsv", "w", encoding="utf-8") as f:
         f.write("\t".join(fields) + "\n")
@@ -1120,10 +1199,9 @@ def test_builder_rejects_chapters_outside_1_2_3(tmp_path: Path) -> None:
         mod.main(["--chapters", "1"])
 
 
-def _annotate_row_fully(
-    cols: list[str], row: list[str], *, en_text: str
-) -> list[str]:
+def _annotate_row_fully(cols: list[str], row: list[str], *, en_text: str) -> list[str]:
     """Helper: set every field needed for --require-complete on one row."""
+
     def _set(name: str, val: str) -> None:
         row[cols.index(name)] = val
 

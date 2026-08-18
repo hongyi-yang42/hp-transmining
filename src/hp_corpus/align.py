@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from .lexicon import anchor_weights, extract_anchors, lexical_bonus_matrix
 from .schema import Alignment, Segment
 
 _SEGMENT_ID_LANG_RE = re.compile(r"^[a-z0-9]+_([a-z]{2,3})_ch\d{2}_p\d{4}_s\d{3}$")
@@ -58,8 +60,7 @@ DEFAULT_LOCALITY_BAND = 0.15
 # the correct path wins again (0.75 > 0.72). A positive-similarity 1:1 still
 # beats gapping BOTH sentences at any penalty (e5 never scores below ~0.69),
 # so this only arbitrates shift-vs-gap and multi-sentence groupings.
-PENALTY_1_TO_0 = 0.1
-PENALTY_0_TO_1 = 0.1
+PENALTY_1_TO_0 = 0.1  # symmetric gap cost; configurable via AlignmentConfig
 # Sentence-similarity floor; below this, prefer to leave both sides unaligned.
 # (Inert in practice for e5 — no pair scores below 0.69 — kept for other
 # models and as a guard.)
@@ -103,18 +104,77 @@ class AlignmentConfig:
     embed_cache_dir: Path
     vecalign_dir: Path | None = None  # reserved for future subprocess use; currently unused
     manual_threshold: float = MANUAL_CONFIDENCE_THRESHOLD
-    # Default to multilingual-e5-base: empirically produces much higher-quality
-    # EN–ZH alignment than the smaller MiniLM (mean conf 0.78 vs 0.66 on
-    # Chapter 1, with 0 records below the 0.5 manual-review threshold vs 36).
-    # Caveat: e5's confidence is less discriminative (all pairs score >0.69),
-    # so for review workflows consider running with both models and flagging
-    # pairs where they disagree.
-    model_name: str = "intfloat/multilingual-e5-base"
+    # Canonical embedding model: LaBSE (local checkout under models/LaBSE,
+    # downloaded from the ModelScope mirror; gitignored). Judge-audited on a
+    # ch1-17 random gold standard (data/derived/alignment_metric_review/):
+    # ZH<->DE acceptable 96.7% / strict DE->ZH 96% vs e5-base 64.7% / 70%.
+    # LaBSE's cosines are NOT compressed the way e5's are, which is exactly
+    # why it wins here — but it also means the penalties below must be on
+    # LaBSE's scale (see gap_penalty). To reproduce the historical e5 runs:
+    # model_name="intfloat/multilingual-e5-base", gap_penalty=0.1.
+    model_name: str = "models/LaBSE"
     locality_band: float = DEFAULT_LOCALITY_BAND
     # When True, recompute embeddings even if a cache file with matching digest
     # exists. Useful for forcing a clean re-encode after model upgrades or
     # suspected cache corruption.
     force_recompute: bool = False
+    # --- Lexical prior (see hp_corpus.lexicon) -----------------------------
+    # Add an IDF-weighted anchor bonus (shared proper nouns / distinctive
+    # numbers) to the cosine matrix, and penalize pairing moves whose total
+    # character-length ratio deviates far beyond the corpus norm. Targets the
+    # residual error classes where e5 is not discriminative: crossed 1:1
+    # pairings in dialogue, and short units force-paired with long ones.
+    use_lexical_prior: bool = True
+    # Calibrated on Ch.1-17 sandbox attribution-consistency: 0.3 is the
+    # plateau point (58.8% baseline -> 69.8%; 0.4-0.5 dip slightly as the
+    # capped bonus saturates into a binary "shares a rare anchor" signal).
+    anchor_weight: float = 0.3
+    anchor_bonus_cap: float = 0.15
+    # de/zh char-ratio distribution on high-margin 1:1 pairs of this corpus:
+    # median 3.45, |log deviation| ~1.1 at p5/p95. Pairs inside the band are
+    # untouched; beyond it the penalty grows linearly in log space.
+    length_ratio_mu: float = 3.45
+    length_ratio_tau: float = 1.1
+    length_penalty: float = 0.05
+    # --- Similarity scoring mode --------------------------------------------
+    # "cosine": raw cosine (current behaviour). "ratio": Artetxe & Schwenk
+    # (2019) margin criterion — each cosine is divided by the mean of its
+    # top-k neighbours on each side of the matrix, which amplifies pairs that
+    # are distinctive relative to their local competition. Targets e5's cosine
+    # compression (true ≈0.75-0.9, wrong ≈0.70): in a dialogue cluster where a
+    # src sentence scores 0.78 on the right tgt and 0.77 on the wrong one, the
+    # wrong one's neighbourhood (every other line mentioning the same cast)
+    # inflates its denominator and the ratio criterion separates the two.
+    similarity_mode: str = "cosine"
+    ratio_k: int = 4
+    # Gap / multi-sentence penalties, configurable because the penalty scale
+    # is model-dependent: e5 compresses all cosines above ~0.69 (cheap gaps
+    # at 0.1 were right), while LaBSE spreads wrong pairs far below true
+    # ones, so a cheap gap penalty makes the DP refuse weak pairs en masse
+    # (1:0/0:1 exploded to 159/70 on the 6-chapter calibration set). 0.18 is
+    # the judge-calibrated value for LaBSE — the canonical default. e5 runs
+    # should set 0.1; the ratio mode's squashed band needs ~0.03.
+    gap_penalty: float = 0.18
+    # 0.01 (down from the historical uniform 0.02): with the length-scaled
+    # penalty short attribution neighbours join groups nearly free either
+    # way, and 0.01 beat 0.02 on the DE->ZH recall audit (37 vs 34/59) at
+    # identical ZH->DE attribution quality.
+    multi_penalty: float = 0.01
+    # N:M group arity cap. 3 was the historical move set (1:1..3:1, 2:2);
+    # 5 is the judge-calibrated default: the DE->ZH recall audit (59-item
+    # LLM-judged sample) showed arity-5 grouping recovers formerly gapped DE
+    # sentences (gap stratum 0% -> 54% correct placement, overall sample
+    # 47% -> 64%) with no change on the ZH->DE attribution layer and no
+    # regression on stable pairs.
+    max_group: int = 5
+    # --- Two-pass anchor-constrained DP (bertalign-style) --------------------
+    # Pass 1 runs a 1:1-only skeleton DP; its records with margin >=
+    # anchor_margin_min become fixed walls. Pass 2 runs the full move set
+    # between consecutive walls, so an error in one dialogue cluster cannot
+    # propagate across a high-margin anchor into the next. Off by default
+    # until the sandbox gate is met.
+    two_pass: bool = False
+    anchor_margin_min: float = 0.15
 
 
 def load_segments(path: str | Path) -> list[Segment]:
@@ -170,8 +230,7 @@ def _build_cache_identity(
         raise CacheValidationError("empty segment list")
     if len(segment_ids) != len(sentences):
         raise CacheValidationError(
-            f"length mismatch: {len(segment_ids)} segment_ids vs "
-            f"{len(sentences)} sentences"
+            f"length mismatch: {len(segment_ids)} segment_ids vs {len(sentences)} sentences"
         )
 
     # Uniform-lang check (also catches malformed IDs).
@@ -190,13 +249,9 @@ def _build_cache_identity(
             raise CacheValidationError(f"malformed segment ID (scope parse): {sid!r}")
         scopes.add(m_scope.group(1))
     if len(langs) > 1:
-        raise CacheValidationError(
-            f"mixed language in segment IDs: {sorted(langs)}"
-        )
+        raise CacheValidationError(f"mixed language in segment IDs: {sorted(langs)}")
     if len(scopes) > 1:
-        raise CacheValidationError(
-            f"mixed chapter scope in segment IDs: {sorted(scopes)}"
-        )
+        raise CacheValidationError(f"mixed chapter scope in segment IDs: {sorted(scopes)}")
     lang = next(iter(langs))
     scope = next(iter(scopes))
 
@@ -210,9 +265,7 @@ def _build_cache_identity(
                 break
         seen.add(sid)
     if dupes:
-        raise CacheValidationError(
-            f"duplicate segment IDs (showing up to 3): {dupes}"
-        )
+        raise CacheValidationError(f"duplicate segment IDs (showing up to 3): {dupes}")
 
     h = hashlib.sha256()
     h.update(schema_version.encode("utf-8"))
@@ -241,9 +294,7 @@ def _build_cache_identity(
     )
 
 
-def _cache_paths(
-    identity: CacheIdentity, cache_dir: Path
-) -> tuple[Path, Path]:
+def _cache_paths(identity: CacheIdentity, cache_dir: Path) -> tuple[Path, Path]:
     """Return (npy_path, meta_path) for a content-addressed cache entry."""
     root = cache_dir / identity.schema_version / identity.lang / identity.scope
     return root / f"{identity.digest16}.npy", root / f"{identity.digest16}.meta.json"
@@ -258,9 +309,7 @@ def _read_meta(meta_path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _meta_matches(
-    meta: dict[str, Any], identity: CacheIdentity, n_rows: int, dim: int
-) -> bool:
+def _meta_matches(meta: dict[str, Any], identity: CacheIdentity, n_rows: int, dim: int) -> bool:
     """Verify that a loaded meta + vector shape are consistent with identity."""
     return (
         meta.get("schema_version") == identity.schema_version
@@ -360,10 +409,50 @@ def embed_sentences(
     return vecs
 
 
+def _ratio_transform(sims: np.ndarray, k: int) -> np.ndarray:
+    """Artetxe & Schwenk (2019) ratio margin criterion, squashed to [0, 1).
+
+    For each cell (i, j): ``r = sims[i, j] / ((fwd[i] + bwd[j]) / 2)`` where
+    ``fwd[i]`` is the mean of src sentence i's top-k cosines over all targets
+    and ``bwd[j]`` the mean of tgt sentence j's top-k cosines over all
+    sources. Both neighbourhoods live in the cross-language similarity matrix
+    itself — exactly the candidates the DP is choosing among. A pair scores
+    high only when it beats its own local competition, which discounts
+    "everyone-mentions-Harry" dialogue clusters where raw cosines compress to
+    a 0.05 band.
+
+    The ratio r is centred near 1.0 (r > 1 means better than the neighbourhood
+    average), so it is squashed with ``r / (1 + r)`` back onto the [0, 1)
+    scale the DP's penalties (0.1 gaps, 0.02 multi-sentence) were calibrated
+    on: true pairs (r ≈ 1.1-1.4) map to ≈0.52-0.58, neighbourhood-average
+    pairs to ≈0.50, also-rans below.
+    """
+    n, m = sims.shape
+    kk = max(1, min(k, n, m))
+    fwd = -np.partition(-sims, kk - 1, axis=1)[:, :kk].mean(axis=1)
+    bwd = -np.partition(-sims, kk - 1, axis=0)[:kk, :].mean(axis=0)
+    denom = (fwd[:, None] + bwd[None, :]) / 2.0
+    r = sims / np.maximum(denom, 1e-9)
+    return r / (1.0 + r)
+
+
 def _global_dp_align(
     src_vecs: np.ndarray,
     tgt_vecs: np.ndarray,
     band: float,
+    *,
+    bonus: np.ndarray | None = None,
+    src_lens: list[int] | None = None,
+    tgt_lens: list[int] | None = None,
+    length_mu: float = 3.45,
+    length_tau: float = 1.1,
+    length_penalty: float = 0.1,
+    similarity_mode: str = "cosine",
+    ratio_k: int = 4,
+    one_to_one_only: bool = False,
+    gap_penalty: float = PENALTY_1_TO_0,
+    multi_penalty: float = MULTI_SENTENCE_PENALTY,
+    max_group: int = 3,
 ) -> list[tuple[list[int], list[int], float, float | None]]:
     """Global DP over all sentences, restricted to a diagonal band.
 
@@ -373,14 +462,14 @@ def _global_dp_align(
     tgt_idx_list) tuple — no duplicates because each sentence index is
     consumed by exactly one transition.
 
-    Pairing moves (1:1, 1:2, 2:1, 1:3, 3:1, 2:2) score the **mean pairwise
-    cosine over the cartesian product** of the consumed sentence groups, minus
-    :data:`MULTI_SENTENCE_PENALTY` per sentence beyond the 1:1 core. Mean —
-    not max-single-pair — scoring credits every sentence the move consumes:
-    under max scoring, a 1:1 on the best-matching half always dominates the
-    N:M that also covers the remaining halves, so partial-context alignments
-    (one DE segment mapped to only the dialogue OR only the narration half of
-    its ZH counterpart) win structurally.
+    Pairing moves (all (di, dj) with ``1 < di + dj <= max_group + 1``,
+    ``max_group=3`` giving the historical set 1:1, 1:2, 2:1, 1:3, 3:1, 2:2)
+    score the **mean pairwise cosine over the cartesian product** of the
+    consumed sentence groups, minus a length-scaled per-extra-sentence
+    penalty. Mean — not max-single-pair — scoring credits every sentence the
+    move consumes: under max scoring, a 1:1 on the best-matching half always
+    dominates the N:M that also covers the remaining halves, so
+    partial-context alignments win structurally.
 
     Each returned record carries a ``margin``: the score gap between the
     chosen move's path total and the best competing move at the same DP cell.
@@ -394,6 +483,12 @@ def _global_dp_align(
         return []
 
     sims = src_vecs @ tgt_vecs.T  # (n, m)
+    if similarity_mode == "ratio":
+        sims = _ratio_transform(sims, ratio_k)
+    elif similarity_mode != "cosine":
+        raise ValueError(f"unknown similarity_mode: {similarity_mode!r}")
+    if bonus is not None:
+        sims = sims + bonus
 
     NEG = -1e9
     dp = np.full((n + 1, m + 1), NEG, dtype=np.float64)
@@ -406,24 +501,70 @@ def _global_dp_align(
         delta = int(max(1, band * m))
         return max(0, center - delta), min(m + 1, center + delta + 1)
 
+    def _length_prior(pi: int, i: int, pj: int, j: int) -> float:
+        """Penalty for a pairing move whose consumed character totals sit far
+        outside the corpus length-ratio band. Applied at the MOVE level (total
+        chars of the consumed group on each side), not per pair — a long DE
+        quote legitimately pairs with a short ZH attribution member inside an
+        N:M block; only the group totals should look balanced."""
+        if length_penalty <= 0 or src_lens is None or tgt_lens is None:
+            return 0.0
+        ls = sum(src_lens[pi:i])
+        lt = sum(tgt_lens[pj:j])
+        if lt == 0:
+            return 0.0
+        deviation = abs(math.log((ls / lt) / length_mu))
+        return length_penalty * max(0.0, deviation - length_tau)
+
+    def _scaled_extra(pi: int, i: int, pj: int, j: int) -> float:
+        """Extra-sentence penalty, scaled by sentence length. Short sentences
+        (attribution fragments like *sagte er*) join a group nearly free —
+        the judge audit found 47/182 attribution-layer pairs missing exactly
+        such a neighbour — while full-length sentences keep the whole
+        per-sentence discount that suppresses over-merging. Without length
+        arrays this degrades to the historical per-count penalty."""
+        e = 0.0
+        for k in range(pi + 1, i):
+            e += 1.0 if src_lens is None else min(1.0, src_lens[k] / 60.0)
+        for k in range(pj + 1, j):
+            e += 1.0 if tgt_lens is None else min(1.0, tgt_lens[k] / 60.0)
+        return e
+
     def _cands(i: int, j: int) -> list[tuple[int, int, float]]:
         """Feasible (di, dj, move_score) moves into cell (i, j)."""
         out: list[tuple[int, int, float]] = []
         # 1:0 / 0:1 — leave one sentence unaligned (penalized)
         if i >= 1 and dp[i - 1, j] > NEG:
-            out.append((1, 0, -PENALTY_1_TO_0))
+            out.append((1, 0, -gap_penalty))
         if j >= 1 and dp[i, j - 1] > NEG:
-            out.append((0, 1, -PENALTY_0_TO_1))
+            out.append((0, 1, -gap_penalty))
         # Pairing moves — mean pairwise similarity over the consumed block.
-        for di, dj in ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1), (2, 2)):
+        # one_to_one_only restricts to (1,1): used as pass 1 of the two-pass
+        # scheme, where the goal is a robust 1:1 skeleton, not coverage.
+        # max_group=3 reproduces the historical move set (1:1..3:1, 2:2).
+        if one_to_one_only:
+            moves: tuple[tuple[int, int], ...] = ((1, 1),)
+        else:
+            moves = tuple(
+                (di, dj)
+                for di in range(1, max_group + 1)
+                for dj in range(1, max_group + 1)
+                if 1 < di + dj <= max_group + 1
+            )
+        for di, dj in moves:
             pi, pj = i - di, j - dj
             if pi < 0 or pj < 0 or dp[pi, pj] <= NEG:
                 continue
             s = float(sims[pi:i, pj:j].mean())
             if s < SIMILARITY_FLOOR:
                 continue
-            extra = (di - 1) + (dj - 1)
-            out.append((di, dj, s - MULTI_SENTENCE_PENALTY * extra))
+            out.append(
+                (
+                    di,
+                    dj,
+                    s - multi_penalty * _scaled_extra(pi, i, pj, j) - _length_prior(pi, i, pj, j),
+                )
+            )
         return out
 
     for i in range(n + 1):
@@ -449,9 +590,7 @@ def _global_dp_align(
         if move is None:
             break
         di, dj, score = move
-        alt_totals = [
-            dp[i - a, j - b] + s for a, b, s in _cands(i, j) if (a, b) != (di, dj)
-        ]
+        alt_totals = [dp[i - a, j - b] + s for a, b, s in _cands(i, j) if (a, b) != (di, dj)]
         margin = float(dp[i, j] - max(alt_totals)) if alt_totals else None
         src_idx = list(range(i - di, i)) if di else []
         tgt_idx = list(range(j - dj, j)) if dj else []
@@ -462,6 +601,114 @@ def _global_dp_align(
 
     matches.reverse()
     return matches
+
+
+def _two_pass_align(
+    src_vecs: np.ndarray,
+    tgt_vecs: np.ndarray,
+    band: float,
+    *,
+    anchor_margin_min: float = 0.15,
+    **dp_kwargs: Any,
+) -> list[tuple[list[int], list[int], float, float | None]]:
+    """Anchor-constrained two-pass DP (algorithm ported from bertalign's
+    approach, GPL-free re-implementation against our own DP).
+
+    Pass 1 runs a **1:1-only** DP (gaps allowed, no N:M moves) and keeps the
+    records whose margin clears ``anchor_margin_min`` as fixed walls — a
+    robust 1:1 skeleton. Restricting pass 1 to 1:1 is what makes the walls
+    load-bearing: with the full move set, pass 1's own optimal path already
+    passes through the anchors, and re-running the same scoring between them
+    is a near no-op by the DP's interval optimality. The skeleton instead
+    commits the unambiguous sentences, and pass 2 — the **full** move set on
+    each interval between consecutive walls — fills in N:M groupings and gaps
+    without being able to drag an error across an anchor.
+
+    Interval scoring is interval-local: the bonus matrix and length arrays
+    are sliced, and in ratio mode the neighbourhood is recomputed on the
+    sub-block. Margins on interval records are relative to the interval's own
+    competing moves; anchor records keep their pass-1 margin. With fewer than
+    two qualifying anchors there is no skeleton to speak of, and the normal
+    single-pass (full moves) result is returned instead.
+    """
+    n = src_vecs.shape[0]
+    m = tgt_vecs.shape[0]
+    pass1 = _global_dp_align(src_vecs, tgt_vecs, band, one_to_one_only=True, **dp_kwargs)
+    anchors = [
+        (src[0], tgt[0], score, margin)
+        for src, tgt, score, margin in pass1
+        if len(src) == 1 and len(tgt) == 1 and margin is not None and margin >= anchor_margin_min
+    ]
+    if len(anchors) < 2:
+        return _global_dp_align(src_vecs, tgt_vecs, band, **dp_kwargs)
+
+    bonus = dp_kwargs.get("bonus")
+    src_lens = dp_kwargs.get("src_lens")
+    tgt_lens = dp_kwargs.get("tgt_lens")
+
+    def _interval(pi: int, pj: int, i: int, j: int):
+        """Align the open interval (walls excluded); [] when empty. A
+        one-sided interval (sentences on only one side) cannot enter the DP
+        (it rejects empty matrices), so it is emitted as unaligned records
+        directly — same shape a gap move would have produced."""
+        if pi >= i and pj >= j:
+            return []
+        if pi >= i:  # only target sentences between the walls
+            return [([], [j2], 0.0, None) for j2 in range(pj, j)]
+        if pj >= j:  # only source sentences between the walls
+            return [([i2], [], 0.0, None) for i2 in range(pi, i)]
+        kwargs = dict(dp_kwargs)
+        if bonus is not None:
+            kwargs["bonus"] = bonus[pi:i, pj:j]
+        if src_lens is not None:
+            kwargs["src_lens"] = src_lens[pi:i]
+        if tgt_lens is not None:
+            kwargs["tgt_lens"] = tgt_lens[pj:j]
+        return [
+            ([a + pi for a in sa], [b + pj for b in tb], score, margin)
+            for sa, tb, score, margin in _global_dp_align(
+                src_vecs[pi:i], tgt_vecs[pj:j], band, **kwargs
+            )
+        ]
+
+    out: list[tuple[list[int], list[int], float, float | None]] = []
+    prev_i, prev_j = 0, 0
+    for si, ti, score, margin in [*anchors, (n, m, None, None)]:
+        out.extend(_interval(prev_i, prev_j, si, ti))
+        if score is not None:  # the anchor itself (walls are records too)
+            out.append(([si], [ti], score, margin))
+            prev_i, prev_j = si + 1, ti + 1  # anchor indices are consumed
+        else:
+            prev_i, prev_j = si, ti
+    return out
+
+
+def _lexical_prior_kwargs(
+    src_texts: list[str], tgt_texts: list[str], config: AlignmentConfig
+) -> dict[str, Any]:
+    """Keyword arguments for :func:`_global_dp_align` implementing the
+    lexical prior, or an empty dict when disabled. Kept as a helper so the
+    DP function stays embeddable/testable in isolation."""
+    if not config.use_lexical_prior:
+        return {}
+    src_anchor_sets = [extract_anchors(t) for t in src_texts]
+    tgt_anchor_sets = [extract_anchors(t) for t in tgt_texts]
+    weights = anchor_weights(src_anchor_sets + tgt_anchor_sets)
+    bonus = lexical_bonus_matrix(
+        src_anchor_sets,
+        tgt_anchor_sets,
+        weights,
+        weight=config.anchor_weight,
+        cap=config.anchor_bonus_cap,
+    )
+    return {
+        "bonus": bonus,
+        "src_lens": [len(t) for t in src_texts],
+        "tgt_lens": [len(t) for t in tgt_texts],
+        "length_mu": config.length_ratio_mu,
+        "length_tau": config.length_ratio_tau,
+        "length_penalty": config.length_penalty,
+    }
 
 
 def align_segments(
@@ -495,8 +742,24 @@ def align_segments(
 
     records: list[Alignment] = []
     align_n = 0
-    for src_idx_list, tgt_idx_list, score, margin in _global_dp_align(
-        src_vecs, tgt_vecs, config.locality_band
+    dp_kwargs: dict[str, Any] = {
+        "similarity_mode": config.similarity_mode,
+        "ratio_k": config.ratio_k,
+        "gap_penalty": config.gap_penalty,
+        "multi_penalty": config.multi_penalty,
+        "max_group": config.max_group,
+        **_lexical_prior_kwargs(src_texts, tgt_texts, config),
+    }
+    if config.two_pass:
+        dp_fn = _two_pass_align
+        dp_kwargs["anchor_margin_min"] = config.anchor_margin_min
+    else:
+        dp_fn = _global_dp_align
+    for src_idx_list, tgt_idx_list, score, margin in dp_fn(
+        src_vecs,
+        tgt_vecs,
+        config.locality_band,
+        **dp_kwargs,
     ):
         src_ids = [src[i].id for i in src_idx_list if 0 <= i < len(src)]
         tgt_ids = [tgt[i].id for i in tgt_idx_list if 0 <= i < len(tgt)]

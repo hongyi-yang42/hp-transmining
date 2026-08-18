@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .candidates import window_ids
+
 # --------------------------------------------------------------------- constants
 
 DATASET_SCOPE = "ch1_3_annotation_target"
@@ -102,8 +104,21 @@ CONTRACTED_PREP_NORMALIZATION: dict[str, str] = {
 # ``conll_extractor.prepositions.data.PREPOSITIONS``). Duplicated here so
 # this module stays self-contained (no vendor import).
 UNCONTRACTED_PREPOSITIONS: frozenset[str] = frozenset(
-    {"an", "auf", "aus", "bei", "durch", "für", "gegen", "hinter",
-     "in", "über", "unter", "von", "zu"}
+    {
+        "an",
+        "auf",
+        "aus",
+        "bei",
+        "durch",
+        "für",
+        "gegen",
+        "hinter",
+        "in",
+        "über",
+        "unter",
+        "von",
+        "zu",
+    }
 )
 
 # Paper §2.2.1 selection filter: keep a PP only if its canonical preposition
@@ -176,6 +191,19 @@ SOURCE_COLUMNS: tuple[str, ...] = (
     "source_row_sha256",
 )
 
+# Retrieval-view context (anchor group ± N sentences in corpus order).
+# Deliberately NOT part of SOURCE_COLUMNS: ``source_row_sha256`` covers every
+# SOURCE_COLUMNS value, and adding columns there would change the hash and
+# break the annotation-CSV binding to already-distributed master rows. The
+# ``*_sentence_ids`` / ``*_aligned_text`` columns above keep their anchor
+# (partition) semantics; these columns are the expanded lookup view.
+CONTEXT_COLUMNS: tuple[str, ...] = (
+    "en_context_ids",
+    "en_context_text",
+    "zh_context_ids",
+    "zh_context_text",
+)
+
 EDITABLE_COLUMNS: tuple[str, ...] = (
     # German-candidate confirmation. Annotator decides whether each row is
     # a legitimate German PP for the annotation pool. ``author_resource_match``
@@ -213,7 +241,7 @@ EDITABLE_COLUMNS: tuple[str, ...] = (
     "general_notes",
 )
 
-ALL_TSV_COLUMNS: tuple[str, ...] = SOURCE_COLUMNS + EDITABLE_COLUMNS
+ALL_TSV_COLUMNS: tuple[str, ...] = SOURCE_COLUMNS + CONTEXT_COLUMNS + EDITABLE_COLUMNS
 
 # Controlled vocabularies — the validator enforces these.
 ALIGNMENT_RELATIONS = frozenset({"direct", "paraphrase", "pronominal", "omitted", "uncertain"})
@@ -383,6 +411,28 @@ def _load_segments(
     return out
 
 
+def _load_chapter_order(
+    segmented_dir: Path, lang: str, chapters: Iterable[int]
+) -> dict[int, list[str]]:
+    """Ordered segment-id list per chapter (corpus order), for the
+    candidate-window expansion. Chapters missing their JSONL are simply
+    absent from the map."""
+    out: dict[int, list[str]] = {}
+    for ch in chapters:
+        path = segmented_dir / f"hp1_{lang}_ch{ch:02d}.jsonl"
+        if not path.exists():
+            continue
+        ids: list[str] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                ids.append(json.loads(line)["id"])
+        out[ch] = ids
+    return out
+
+
 @dataclass
 class _AlignmentSide:
     """One side of an alignment record, identified by segment IDs rather
@@ -531,9 +581,7 @@ def _load_alignments(
                     sides=(sides[0], sides[1]),
                     type_str=rec.get("type", ""),
                     confidence=float(rec.get("confidence", 0.0)),
-                    margin=(
-                        float(rec["margin"]) if rec.get("margin") is not None else None
-                    ),
+                    margin=(float(rec["margin"]) if rec.get("margin") is not None else None),
                 )
                 src_side = record.side_for_lang(src_lang)
                 if src_side is None or not src_side.sentence_ids:
@@ -669,6 +717,7 @@ def build_candidates(
     aligned_dir: Path,
     chapters: Iterable[int],
     zero_hits_ok: frozenset[tuple[int, str]] = frozenset(),
+    context_window: int = 1,
 ) -> list[dict[str, Any]]:
     """Build the full candidate list for all chapters.
 
@@ -700,6 +749,8 @@ def build_candidates(
     de_segments = _load_segments(segmented_dir, "de", chapters)
     en_segments = _load_segments(segmented_dir, "en", chapters)
     zh_segments = _load_segments(segmented_dir, "zh", chapters)
+    en_order = _load_chapter_order(segmented_dir, "en", chapters)
+    zh_order = _load_chapter_order(segmented_dir, "zh", chapters)
 
     de_en_alignments = _load_alignments(aligned_dir, "de", "en", chapters)
     de_zh_alignments = _load_alignments(aligned_dir, "de", "zh", chapters)
@@ -741,6 +792,17 @@ def build_candidates(
                 en_side = en_rec.side_for_lang("en") if en_rec else None
                 zh_side = zh_rec.side_for_lang("zh") if zh_rec else None
 
+                en_ctx_ids = window_ids(
+                    en_side.sentence_ids if en_side else [],
+                    en_order.get(ch, []),
+                    context_window,
+                )
+                zh_ctx_ids = window_ids(
+                    zh_side.sentence_ids if zh_side else [],
+                    zh_order.get(ch, []),
+                    context_window,
+                )
+
                 # Cardinality is from DE's perspective: n_de : n_tgt.
                 de_side_en = en_rec.side_for_lang("de") if en_rec else None
                 de_side_zh = zh_rec.side_for_lang("de") if zh_rec else None
@@ -772,17 +834,22 @@ def build_candidates(
                     "en_alignment_cardinality": _cardinality(de_side_en, en_side),
                     "en_alignment_status": _status_for(sent_id, de_en_alignments, "en"),
                     "en_alignment_confidence": en_rec.confidence if en_rec else 0.0,
-                    "en_alignment_margin": (
-                        en_rec.margin if en_rec is not None else None
-                    ),
+                    "en_alignment_margin": (en_rec.margin if en_rec is not None else None),
                     # ZH
                     "zh_sentence_ids": list(zh_side.sentence_ids) if zh_side else [],
                     "zh_aligned_text": _aligned_text(zh_side, zh_segments),
                     "zh_alignment_cardinality": _cardinality(de_side_zh, zh_side),
                     "zh_alignment_status": _status_for(sent_id, de_zh_alignments, "zh"),
                     "zh_alignment_confidence": zh_rec.confidence if zh_rec else 0.0,
-                    "zh_alignment_margin": (
-                        zh_rec.margin if zh_rec is not None else None
+                    "zh_alignment_margin": (zh_rec.margin if zh_rec is not None else None),
+                    # Context windows (retrieval view; see CONTEXT_COLUMNS).
+                    "en_context_ids": list(en_ctx_ids),
+                    "en_context_text": " ".join(
+                        en_segments[sid].text for sid in en_ctx_ids if sid in en_segments
+                    ),
+                    "zh_context_ids": list(zh_ctx_ids),
+                    "zh_context_text": " ".join(
+                        zh_segments[sid].text for sid in zh_ctx_ids if sid in zh_segments
                     ),
                     # Pilot (filled later by select_pilot)
                     "pilot_selected": False,

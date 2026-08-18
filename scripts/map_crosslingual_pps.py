@@ -92,23 +92,33 @@ def _serialize_pp(pp: PPElement) -> dict:
     }
 
 
-def _serialize_scored(scored) -> dict:
+def _serialize_scored(scored, block_to_segment: dict[str, str]) -> dict:
+    seg = block_to_segment.get(scored.pp.sent_id)
     return {
         "score": round(scored.score, 3),
         "components": [{"signal": s, "weight": round(w, 3)} for s, w in scored.components],
         "pp": _serialize_pp(scored.pp),
+        "source_segment_id": seg,
     }
 
 
-def _serialize_result(side: str, result: MappingResult) -> dict:
+def _serialize_result(
+    side: str,
+    result: MappingResult,
+    block_to_segment: dict[str, str],
+    anchor_ids: set[str],
+) -> dict:
     return {
         f"{side}_status": result.status,
         f"{side}_best_score": round(result.best_score, 3),
-        f"{side}_components": [
-            {"signal": s, "weight": round(w, 3)} for s, w in result.components
-        ],
+        f"{side}_components": [{"signal": s, "weight": round(w, 3)} for s, w in result.components],
         f"{side}_best": _serialize_pp(result.best) if result.best else None,
-        f"{side}_alternatives": [_serialize_scored(s) for s in result.alternatives],
+        f"{side}_best_in_anchor": (
+            block_to_segment.get(result.best.sent_id) in anchor_ids if result.best else None
+        ),
+        f"{side}_alternatives": [
+            _serialize_scored(s, block_to_segment) for s in result.alternatives
+        ],
         f"{side}_n_candidates": result.n_candidates_considered,
         f"{side}_reason": result.reason,
     }
@@ -140,14 +150,32 @@ def build_mapping_record(
     cand: dict,
     en_by_segment: dict[str, list[Sentence]],
     zh_by_segment: dict[str, list[Sentence]],
+    en_block_to_segment: dict[str, str] | None = None,
+    zh_block_to_segment: dict[str, str] | None = None,
 ) -> dict:
-    """Build one cross-lingual mapping record from a candidate."""
-    en_sents, en_unresolved = _blocks_for_alignment(
-        cand.get("en_sentence_ids", []), en_by_segment
-    )
-    zh_sents, zh_unresolved = _blocks_for_alignment(
-        cand.get("zh_sentence_ids", []), zh_by_segment
-    )
+    """Build one cross-lingual mapping record from a candidate.
+
+    PP search runs over the **candidate window** (anchor group ± ``w``
+    sentences in corpus order) when the candidate JSONL carries
+    ``{en,zh}_context_ids`` — the judge audit showed the true partner sits
+    outside the strict anchor for ~1/3 of DE sentences, and a PP living in
+    a neighbour sentence is otherwise never even searched. Anchors stay
+    distinguishable: ``{side}_best_in_anchor`` and per-alternative
+    ``source_segment_id`` record where each proposal came from.
+    """
+    en_anchor = cand.get("en_sentence_ids", [])
+    zh_anchor = cand.get("zh_sentence_ids", [])
+    # Window ids if the pack builder emitted them; else anchor-only
+    # (window w=0, historical behaviour).
+    en_search_ids = cand.get("en_context_ids") or en_anchor
+    zh_search_ids = cand.get("zh_context_ids") or zh_anchor
+
+    en_sents, _ = _blocks_for_alignment(en_search_ids, en_by_segment)
+    zh_sents, _ = _blocks_for_alignment(zh_search_ids, zh_by_segment)
+    # Unresolved counts stay anchor-semantics: a window neighbour without
+    # parse blocks is merely unsearchable context, not an integrity failure.
+    en_unresolved = sum(1 for sid in en_anchor if not en_by_segment.get(sid))
+    zh_unresolved = sum(1 for sid in zh_anchor if not zh_by_segment.get(sid))
 
     en_result, zh_result = propose_for_sides(
         de_prep_normalized=cand["de_prep_normalized"],
@@ -175,13 +203,17 @@ def build_mapping_record(
         "en_alignment_confidence": cand["en_alignment_confidence"],
         "zh_alignment_cardinality": cand["zh_alignment_cardinality"],
         "zh_alignment_confidence": cand["zh_alignment_confidence"],
+        "en_sentence_ids": list(en_anchor),
+        "zh_sentence_ids": list(zh_anchor),
+        "en_context_ids": list(en_search_ids),
+        "zh_context_ids": list(zh_search_ids),
         "n_en_sentences_seen": len(en_sents),
         "n_zh_sentences_seen": len(zh_sents),
         "n_en_alignment_ids_unresolved": en_unresolved,
         "n_zh_alignment_ids_unresolved": zh_unresolved,
     }
-    record.update(_serialize_result("en", en_result))
-    record.update(_serialize_result("zh", zh_result))
+    record.update(_serialize_result("en", en_result, en_block_to_segment or {}, set(en_anchor)))
+    record.update(_serialize_result("zh", zh_result, zh_block_to_segment or {}, set(zh_anchor)))
     return record
 
 
@@ -222,6 +254,11 @@ def summarize(records: list[dict]) -> dict:
     en_unresolved = sum(r["n_en_alignment_ids_unresolved"] for r in records)
     zh_unresolved = sum(r["n_zh_alignment_ids_unresolved"] for r in records)
 
+    # Window rescues: matched best PP found in a context sentence rather
+    # than in the anchor group — the retrieval value of the candidate window.
+    en_rescued = sum(1 for r in records if r.get("en_best_in_anchor") is False)
+    zh_rescued = sum(1 for r in records if r.get("zh_best_in_anchor") is False)
+
     return {
         "record_total": len(records),
         "en_status": dict(en_status),
@@ -234,6 +271,8 @@ def summarize(records: list[dict]) -> dict:
         "per_chapter_en_status": {str(k): v for k, v in sorted(by_chapter.items())},
         "en_alignment_ids_unresolved": en_unresolved,
         "zh_alignment_ids_unresolved": zh_unresolved,
+        "en_window_rescued": en_rescued,
+        "zh_window_rescued": zh_rescued,
     }
 
 
@@ -257,8 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         default=True,
         help=(
-            "Only map candidates where author_resource_match is True "
-            "(paper FILTER_CONTRACTED_123)."
+            "Only map candidates where author_resource_match is True (paper FILTER_CONTRACTED_123)."
         ),
     )
     ap.add_argument(
@@ -287,10 +325,20 @@ def main(argv: list[str] | None = None) -> int:
     zh_parsed = _load_parsed_chapters(args.parsed_dir, "zh", chapters)
     en_by_segment = index_blocks_by_segment(en_parsed)
     zh_by_segment = index_blocks_by_segment(zh_parsed)
+    en_block_to_segment = {b.sent_id: b.source_segment_id for b in en_parsed.values()}
+    zh_block_to_segment = {b.sent_id: b.source_segment_id for b in zh_parsed.values()}
 
     records: list[dict] = []
     for cand in selected:
-        records.append(build_mapping_record(cand, en_by_segment, zh_by_segment))
+        records.append(
+            build_mapping_record(
+                cand,
+                en_by_segment,
+                zh_by_segment,
+                en_block_to_segment,
+                zh_block_to_segment,
+            )
+        )
 
     # Stable-sort for reproducible output.
     records.sort(
@@ -333,6 +381,10 @@ def main(argv: list[str] | None = None) -> int:
         f"  unresolved alignment segment ids: "
         f"EN={summary['en_alignment_ids_unresolved']} "
         f"ZH={summary['zh_alignment_ids_unresolved']}"
+    )
+    print(
+        f"  best PP found outside anchor (window rescue): "
+        f"EN={summary['en_window_rescued']} ZH={summary['zh_window_rescued']}"
     )
     print("outputs:")
     print(f"  {out_jsonl}")
