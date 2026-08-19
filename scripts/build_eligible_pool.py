@@ -24,6 +24,12 @@ written:
   * any ``de_valid`` other than ``include`` / ``exclude`` (blank or
     ``uncertain`` means the review is not finished).
 
+Interpretation note: EN/ZH ``omitted`` marks are only a true omission
+when the same side's alignment confidence is ``high``/``medium``/``low``;
+``omitted`` + ``not_aligned`` means retrieval failed and the row needs
+repair (see docs/ANNOTATION_CSV.md). Any analysis counting omissions
+must apply that distinction — it is not applied here.
+
 The pool rule itself (``hp_corpus.sampling.build_eligible_pool``):
 13-item paired preposition inventory; uncontracted Ch.1–17 after the
 ART+det structural gate and an ``include`` review; contracted Ch.1–3

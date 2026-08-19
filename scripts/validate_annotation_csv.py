@@ -11,18 +11,25 @@ Structure + binding (run on every file, filled or not):
   * the id set equals the master's datapoint_id set — both directions
     (no extra rows, no missing rows);
   * every ``row_hash`` equals the master's ``source_row_sha256`` for
-    the same id (the returned file is bound to this exact master).
+    the same id (the returned file is bound to this exact master);
+  * every machine column is re-derived from the master row
+    (MASTER_TO_CSV_COLUMNS) and compared cell by cell — a returned file
+    whose ``english_context`` / ``chinese_context`` / … was edited (even
+    with an untouched ``row_hash``) fails closed.
 
 Annotation content (skipped while the file is in template state —
 every annotator cell blank):
 
   * ``de_valid`` ∈ {include, exclude}; ``exclude`` requires an
-    ``de_exclusion_reason`` from the vocabulary; ``include`` requires
-    the reason blank;
+    ``de_exclusion_reason`` from the vocabulary; ``include`` requires the
+    reason blank;
   * ``en_form`` / ``zh_form`` from their vocabularies;
   * coupling: a counterpart span requires a form and vice versa —
     except ``omitted`` (form set, span must be blank) and ``uncertain``
     (form set, span optional, notes required);
+  * a set form requires a non-blank alignment confidence on the same
+    side — ``omitted`` must stay distinguishable from retrieval failure
+    via ``omitted + not_aligned`` (see docs/ANNOTATION_CSV.md);
   * ``en_alignment_confidence`` / ``zh_alignment_confidence`` ∈
     {high, medium, low, not_aligned}.
 
@@ -43,6 +50,7 @@ from hp_corpus.annotation_csv import (
     DE_VALID_VALUES,
     EN_FORMS,
     EXCLUSION_REASONS,
+    MASTER_TO_CSV_COLUMNS,
     ZH_FORMS,
 )
 
@@ -65,13 +73,13 @@ def read_csv_rows(path: Path) -> tuple[list[dict[str, str]], list[str]]:
     return rows, header
 
 
-def read_master_hashes(path: Path) -> dict[str, str]:
+def read_master_rows(path: Path) -> dict[str, dict[str, str]]:
     with open(path, encoding="utf-8", newline="") as f:
-        out: dict[str, str] = {}
+        out: dict[str, dict[str, str]] = {}
         for row in csv.DictReader(f, delimiter="\t"):
             dp = row.get("datapoint_id", "")
             if dp:
-                out[dp] = row.get("source_row_sha256", "")
+                out[dp] = row
         return out
 
 
@@ -81,10 +89,60 @@ def _is_template(rows: list[dict[str, str]]) -> bool:
     )
 
 
+def _binding_errors(
+    csv_rows: list[dict[str, str]], master_rows: dict[str, dict[str, str]]
+) -> list[str]:
+    """Row-set binding plus machine-column integrity. Rule-level errors
+    only — no row content, no ids."""
+    errors: list[str] = []
+
+    ids: list[str] = []
+    for r in csv_rows:
+        dp = (r.get("id", "") or "").strip()
+        if not dp:
+            errors.append("BLANK_ID")
+        else:
+            ids.append(dp)
+    if len(ids) != len(set(ids)):
+        errors.append("DUPLICATE_ID")
+
+    csv_id_set = set(ids)
+    master_id_set = set(master_rows)
+    if csv_id_set - master_id_set:
+        errors.append("ID_NOT_IN_MASTER")
+    if master_id_set - csv_id_set:
+        errors.append("MASTER_ROW_MISSING")
+
+    hash_mismatch = False
+    edited_columns: set[str] = set()
+    for r in csv_rows:
+        dp = (r.get("id", "") or "").strip()
+        master = master_rows.get(dp)
+        if master is None:
+            continue  # already reported above
+        if (r.get("row_hash", "") or "").strip() != (
+            master.get("source_row_sha256", "") or ""
+        ).strip():
+            hash_mismatch = True
+        # Re-derive every machine column from the master row; the
+        # returned file must carry the master's values verbatim.
+        for master_col, csv_col in MASTER_TO_CSV_COLUMNS.items():
+            expected = (master.get(master_col, "") or "").strip()
+            actual = (r.get(csv_col, "") or "").strip()
+            if actual != expected:
+                edited_columns.add(csv_col)
+    if hash_mismatch:
+        errors.append("ROW_HASH_MISMATCH")
+    if edited_columns:
+        errors.append("MACHINE_COLUMN_EDITED (" + ", ".join(sorted(edited_columns)) + ")")
+    return errors
+
+
 def _coupling_errors(row: dict[str, str], lang: str, forms: frozenset[str]) -> list[str]:
     span = (row.get(f"{lang}_counterpart", "") or "").strip()
     form = (row.get(f"{lang}_form", "") or "").strip()
     notes = (row.get(f"{lang}_notes", "") or "").strip()
+    confidence = (row.get(f"{lang}_alignment_confidence", "") or "").strip()
     errors: list[str] = []
     if form and form not in forms:
         errors.append(f"{lang}_form={form!r} not in vocabulary")
@@ -99,13 +157,17 @@ def _coupling_errors(row: dict[str, str], lang: str, forms: frozenset[str]) -> l
             errors.append(f"{lang}_form={form!r} requires a {lang}_counterpart span")
     elif span:
         errors.append(f"{lang}_counterpart without {lang}_form")
+    if form and not confidence:
+        errors.append(f"{lang}_form set but {lang}_alignment_confidence blank")
+    if confidence and confidence not in ALIGNMENT_CONFIDENCES:
+        errors.append(f"{lang}_ALIGNMENT_CONFIDENCE_INVALID")
     return errors
 
 
 def validate(
     csv_rows: list[dict[str, str]],
     header: list[str],
-    master_hashes: dict[str, str],
+    master_rows: dict[str, dict[str, str]],
 ) -> tuple[list[str], dict[str, int]]:
     """Return (errors, summary_counts). Errors are rule-level strings
     without row content — no text, lemmas, or ids leak."""
@@ -115,31 +177,7 @@ def validate(
         errors.append("HEADER_MISMATCH")
         return errors, {"rows": len(csv_rows), "template_state": 0}
 
-    ids: list[str] = []
-    for r in csv_rows:
-        dp = (r.get("id", "") or "").strip()
-        if not dp:
-            errors.append("BLANK_ID")
-        else:
-            ids.append(dp)
-    if len(ids) != len(set(ids)):
-        errors.append("DUPLICATE_ID")
-
-    csv_id_set = set(ids)
-    master_id_set = set(master_hashes)
-    if csv_id_set - master_id_set:
-        errors.append("ID_NOT_IN_MASTER")
-    if master_id_set - csv_id_set:
-        errors.append("MASTER_ROW_MISSING")
-
-    for r in csv_rows:
-        dp = (r.get("id", "") or "").strip()
-        expected = master_hashes.get(dp)
-        if expected is None:
-            continue  # already reported above
-        if (r.get("row_hash", "") or "").strip() != expected:
-            errors.append("ROW_HASH_MISMATCH")
-            break  # one report is enough — the file is from another master
+    errors.extend(_binding_errors(csv_rows, master_rows))
 
     counts = {
         "rows": len(csv_rows),
@@ -173,9 +211,6 @@ def validate(
             if span or form:
                 counts[f"{lang}_marked"] += 1
             errors.extend(_coupling_errors(r, lang, forms))
-            confidence = (r.get(f"{lang}_alignment_confidence", "") or "").strip()
-            if confidence and confidence not in ALIGNMENT_CONFIDENCES:
-                errors.append(f"{lang}_ALIGNMENT_CONFIDENCE_INVALID")
 
     return errors, counts
 
@@ -192,8 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         return _exit("MASTER_TSV_ABSENT", str(args.master_tsv))
 
     csv_rows, header = read_csv_rows(args.csv)
-    master_hashes = read_master_hashes(args.master_tsv)
-    errors, counts = validate(csv_rows, header, master_hashes)
+    master_rows = read_master_rows(args.master_tsv)
+    errors, counts = validate(csv_rows, header, master_rows)
 
     # Aggregate stdout only — rule names and counts, never row content.
     print(f"rows: {counts['rows']}")

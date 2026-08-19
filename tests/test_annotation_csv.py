@@ -30,8 +30,14 @@ def _master_row(dp: str, **overrides) -> dict[str, str]:
         "de_pp_surface": 'im, "großen" Haus',
         "de_head_lemma": "Haus",
         "de_sentence_text": 'Er ging, wie er sagte, ins "große" Haus.',
-        "en_aligned_text": 'He went, as he said, into the "big" house. 后续中文，逗号。',
+        "en_aligned_text": 'He went, as he said, into the "big" house.',
+        "en_context_ids": "hp1_en_ch03_p0002_s004|hp1_en_ch03_p0002_s005",
+        "en_context_text": (
+            'Prev line. He went, as he said, into the "big" house. Next line. 后续中文，逗号。'
+        ),
         "zh_aligned_text": "他说着，走进了那幢大房子。",
+        "zh_context_ids": "hp1_zh_ch03_p0002_s004|hp1_zh_ch03_p0002_s005",
+        "zh_context_text": "上一句。他说着，走进了那幢大房子。下一句。",
         "source_row_sha256": "a" * 64,
     }
     row.update(overrides)
@@ -75,8 +81,12 @@ def test_builds_csv_with_schema_blanks_and_bom(tmp_path: Path) -> None:
     assert len(rows) == 2
     assert rows[0]["id"] == "dp1"
     assert rows[0]["german_pp"] == 'im, "großen" Haus'
+    # The CSV carries the retrieval view (anchor ± window), not the bare
+    # aligned anchor text.
+    assert rows[0]["english_context"].startswith("Prev line.")
     assert rows[0]["english_context"].endswith("后续中文，逗号。")
-    assert rows[0]["chinese_context"] == "他说着，走进了那幢大房子。"
+    assert "他说着，走进了那幢大房子。" in rows[0]["chinese_context"]
+    assert rows[0]["chinese_context"].startswith("上一句。")
     assert rows[0]["row_hash"] == "a" * 64
     # Annotator columns all blank.
     for r in rows:
@@ -123,7 +133,7 @@ def test_fail_closed_on_missing_master_columns(tmp_path: Path) -> None:
 
 
 def test_fail_closed_on_blank_machine_cell(tmp_path: Path) -> None:
-    mod, out, rc = _build(tmp_path, [_master_row("dp1", en_aligned_text="")])
+    mod, out, rc = _build(tmp_path, [_master_row("dp1", en_context_text="")])
     assert rc == 2
     assert not out.exists()
 
