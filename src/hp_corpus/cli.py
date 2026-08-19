@@ -198,15 +198,6 @@ def cmd_parse(args: argparse.Namespace) -> int:
     return 0
 
 
-def _lang_from_path(path: str) -> str:
-    """Extract the language code from a segmented-file path like
-    'data/segmented/hp1_en_ch01.jsonl' → 'en'."""
-    import re
-
-    m = re.search(r"_([a-z]{2,3})_ch\d+", path)
-    return m.group(1) if m else "x"
-
-
 def cmd_align(args: argparse.Namespace) -> int:
     src = load_segments(args.src)
     tgt = load_segments(args.tgt)
@@ -218,11 +209,7 @@ def cmd_align(args: argparse.Namespace) -> int:
         force_recompute=args.force_recompute,
     )
     alignments = align_segments(src, tgt, config).records
-    # Output name derived from input languages: hp1_<src>_<tgt>_ch01.jsonl
-    src_lang = _lang_from_path(args.src)
-    tgt_lang = _lang_from_path(args.tgt)
-    out_name = args.out_name or f"hp1_{src_lang}_{tgt_lang}_ch01.jsonl"
-    out = Path(args.output) / out_name
+    out = Path(args.output) / args.out_name
     write_alignments_jsonl(alignments, out)
     summary = alignment_summary(alignments)
     _console.print(f"align → {out}  ([cyan]{summary['count']}[/] records)")
@@ -291,15 +278,14 @@ def main(argv: list[str] | None = None) -> int:
     p_align.add_argument("--output", required=True, help="Output directory")
     p_align.add_argument(
         "--out-name",
-        default=None,
-        help="Output filename (default: hp1_<src>_<tgt>_ch01.jsonl, derived from inputs)",
+        required=True,
+        help="Output filename, e.g. hp1_de_en_ch01.jsonl",
     )
     p_align.add_argument(
         "--model",
         default="models/LaBSE",
-        help="sentence-transformers model name or local path (canonical "
-        "default: LaBSE under models/; historical runs used "
-        "intfloat/multilingual-e5-base with --gap-penalty 0.1)",
+        help="sentence-transformers model name or local path "
+        "(canonical: LaBSE under models/, see config/embedding_models.yaml)",
     )
     p_align.add_argument(
         "--band",

@@ -8,7 +8,7 @@ Translation mining extracts grammatical categories (here: definiteness) from par
 
 ## What this project does
 
-- **Builds a parallel corpus from PDFs.** Extracts embedded text layers (all three computational sources are born-digital PDFs; PaddleOCR remains wired in for image-only scans, and an earlier image-only ZH scan was retired after an audit showed OCR line loss), applies conservative cleaning heuristics, segments into sentences with stable IDs, and aligns sentence pairs across languages via `intfloat/multilingual-e5-base` embeddings + dynamic programming.
+- **Builds a parallel corpus from PDFs.** Extracts embedded text layers (all three computational sources are born-digital PDFs; PaddleOCR remains wired in for image-only scans, and an earlier image-only ZH scan was retired after an audit showed OCR line loss), applies conservative cleaning heuristics, segments into sentences with stable IDs, and aligns sentence pairs across languages via **LaBSE** embeddings (local checkout under `models/`, identity pinned in `config/embedding_models.yaml`) + dynamic programming.
 - **Parses with Universal Dependencies.** Stanza (tokenize + mwt + pos + lemma + depparse) → CoNLL-U for all three languages, preserving German contraction range lines (`5-6 im`) so the paper's extractor works unmodified.
 - **Extracts prepositional phrases.** An adapted `conll-extractor` runs over the German CoNLL-U; each extracted form–lemma pair is checked against the authors' public filter resources (`FILTER_CONTRACTED_123` / `FILTER_PP`) for extraction QA. This check does **not** identify membership in the paper's final 96 trilingual contexts.
 
@@ -18,11 +18,11 @@ Translation mining extracts grammatical categories (here: definiteness) from par
 hp-corpus validate                              # SHA-256 + page-count + text-layer checks
 hp-corpus run       --config config/hp1_*.yaml  # render → ocr → clean → segment
 hp-corpus parse     --config config/hp1_*.yaml  # → CoNLL-U (Stanza)
-hp-corpus align     --src … --tgt … --out-name … # cross-language e5-base + DP alignment
+hp-corpus align     --src … --tgt … --out-name … # cross-language LaBSE + DP alignment
 
 # Extraction & cross-lingual mapping (post-alignment, see scripts/):
 uv run python scripts/run_full_novel_german_extraction.py --chapters 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17  # paper-faithful PP extraction on DE CoNLL-U (per-row parse_block_id + source_segment_id)
-uv run python scripts/run_alignments_v2.py --chapters 4 5 6 7 8 9 10 11 12 13 14 15 16 17  # chapter-pair alignments + manifests (default 1 2 3)
+uv run python scripts/run_alignments_v2.py  # DE–EN + DE–ZH alignments for Ch.1–17 + manifests (--diagnostics adds EN–ZH)
 uv run python scripts/build_full_novel_annotation.py    # full-novel machine candidate pool (human columns blank)
 uv run python scripts/build_annotation_csv.py --master-tsv data/derived/step4/full_novel_annotation_master.tsv --output data/derived/annotation/annotation_pairs.csv  # annotator-facing trilingual pair CSV (per docs/ANNOTATION_CSV.md)
 ```
