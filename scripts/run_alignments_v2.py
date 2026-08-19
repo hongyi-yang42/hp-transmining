@@ -215,6 +215,9 @@ def run_one(src_lang: str, tgt_lang: str, chapter: int, force: bool) -> dict[str
             "path": str(out_aligned),
             "record_count": len(alignments),
             "type_counts": type_counts,
+            # The needs_review flag lives on the JSONL records; carrying the
+            # count here keeps manifest-only audits from reading 0 by absence.
+            "needs_review_count": sum(1 for a in alignments if a.needs_review),
             "missing_count": {
                 "src_side_unaligned_1_0": missing_src_side,
                 "tgt_side_unaligned_0_1": missing_tgt_side,
