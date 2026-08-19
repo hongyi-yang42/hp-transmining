@@ -321,25 +321,64 @@ def test_dp_margin_nonnegative_and_present() -> None:
     assert margins and all(m >= -1e-9 for m in margins)
 
 
-def test_alignment_schema_margin_optional_for_old_records() -> None:
-    """Alignment records written before the margin field existed (no margin
-    key) must still validate, with margin defaulting to None."""
+def test_alignment_schema_legacy_records_normalize() -> None:
+    """Records from the pre-rename serializer (field names hard-coded
+    en/zh for every language pair, method "vecalign_labse", no
+    margin/lang/needs_review keys) must normalize to the current schema:
+    sides mapped positionally to src/tgt, method normalized, languages
+    derived from segment IDs, margin None, needs_review False."""
     rec = Alignment.model_validate_json(
-        '{"align_id":"a0001","en":["hp1_en_ch01_p0001_s001"],'
+        '{"align_id":"a0001","en":["hp1_de_ch01_p0001_s001"],'
         '"zh":["hp1_zh_ch01_p0001_s001"],"type":"1:1","confidence":0.8,'
         '"method":"vecalign_labse","validated":false}'
     )
+    assert rec.src == ["hp1_de_ch01_p0001_s001"]
+    assert rec.tgt == ["hp1_zh_ch01_p0001_s001"]
+    assert rec.src_lang == "de"
+    assert rec.tgt_lang == "zh"
+    assert rec.method == "embedding_dp"
     assert rec.margin is None
+    assert rec.needs_review is False
     rec2 = Alignment(
         align_id="a0002",
-        en=["hp1_en_ch01_p0001_s002"],
-        zh=["hp1_zh_ch01_p0001_s002"],
+        src=["hp1_de_ch01_p0001_s002"],
+        tgt=["hp1_en_ch01_p0001_s002"],
+        src_lang="de",
+        tgt_lang="en",
         type="1:1",
         confidence=0.8,
-        method="vecalign_labse",
+        method="embedding_dp",
         margin=0.12,
     )
     assert rec2.margin == pytest.approx(0.12)
+
+
+@pytest.mark.parametrize("score,expected_review", [(0.3, True), (0.9, False)])
+def test_low_confidence_flags_needs_review_not_manual(
+    tmp_path: Path, fake_encoder, monkeypatch, score: float, expected_review: bool
+) -> None:
+    """A machine record scoring below review_threshold must stay
+    method="embedding_dp" with needs_review=True — never relabeled
+    "manual", since no human aligned it."""
+    from hp_corpus.align import AlignmentConfig, align_segments
+
+    de = [_mk_seg("hp1_de_ch01_p0001_s001", "alpha de")]
+    en = [_mk_seg("hp1_en_ch01_p0001_s001", "alpha en")]
+
+    monkeypatch.setattr(
+        "hp_corpus.align._global_dp_align",
+        lambda *a, **k: [([0], [0], score, None)],
+    )
+
+    cfg = AlignmentConfig(embed_cache_dir=tmp_path, model_name="fake/M")
+    records = align_segments(de, en, cfg)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.method == "embedding_dp"
+    assert rec.needs_review is expected_review
+    assert rec.src_lang == "de" and rec.tgt_lang == "en"
+    assert rec.src[0].startswith("hp1_de_")
+    assert rec.tgt[0].startswith("hp1_en_")
 
 
 # --------------------------------------------------------------------- lexical prior

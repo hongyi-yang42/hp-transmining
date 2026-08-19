@@ -46,7 +46,9 @@ _SEGMENT_ID_SCOPE_RE = re.compile(r"^([a-z0-9]+_[a-z]{2,3}_ch\d{2})_p\d{4}_s\d{3
 # caches become invisible to a bumped version (a new subdir is used).
 CACHE_SCHEMA_VERSION = "v2"
 
-MANUAL_CONFIDENCE_THRESHOLD = 0.5
+# Records scoring below this stay machine records (method="embedding_dp")
+# and are flagged needs_review=True for human triage — never relabeled manual.
+REVIEW_CONFIDENCE_THRESHOLD = 0.5
 # Diagonal-band width as a fraction of length. (i, j) is reachable only when
 # |i/n - j/m| <= locality_band. 0.15 = sentences can drift by ±15% of length.
 DEFAULT_LOCALITY_BAND = 0.15
@@ -103,7 +105,7 @@ class CacheIdentity:
 class AlignmentConfig:
     embed_cache_dir: Path
     vecalign_dir: Path | None = None  # reserved for future subprocess use; currently unused
-    manual_threshold: float = MANUAL_CONFIDENCE_THRESHOLD
+    review_threshold: float = REVIEW_CONFIDENCE_THRESHOLD
     # Canonical embedding model: LaBSE (local checkout under models/LaBSE,
     # downloaded from the ModelScope mirror; gitignored). Judge-audited on a
     # ch1-17 random gold standard (data/derived/alignment_metric_review/):
@@ -327,7 +329,7 @@ def embed_sentences(
     sentences: list[str],
     segment_ids: list[str],
     cache_dir: str | Path,
-    model_name: str = "intfloat/multilingual-e5-base",
+    model_name: str = "models/LaBSE",
     *,
     force_recompute: bool = False,
     schema_version: str = CACHE_SCHEMA_VERSION,
@@ -742,6 +744,8 @@ def align_segments(
 
     records: list[Alignment] = []
     align_n = 0
+    src_lang = _lang_of_segments(src)
+    tgt_lang = _lang_of_segments(tgt)
     dp_kwargs: dict[str, Any] = {
         "similarity_mode": config.similarity_mode,
         "ratio_k": config.ratio_k,
@@ -767,16 +771,19 @@ def align_segments(
             continue
         align_n += 1
         type_str = f"{len(src_ids)}:{len(tgt_ids)}"
-        method = "vecalign_labse" if score >= config.manual_threshold else "manual"
+        needs_review = score < config.review_threshold
         records.append(
             Alignment(
                 align_id=f"a{align_n:04d}",
-                en=src_ids,
-                zh=tgt_ids,
+                src=src_ids,
+                tgt=tgt_ids,
+                src_lang=src_lang,
+                tgt_lang=tgt_lang,
                 type=type_str,  # type: ignore[arg-type]
                 confidence=max(0.0, min(1.0, score)),
-                method=method,  # type: ignore[arg-type]
+                method="embedding_dp",
                 margin=margin,
+                needs_review=needs_review,
                 validated=False,
             )
         )
@@ -810,4 +817,5 @@ def alignment_summary(alignments: list[Alignment]) -> dict[str, Any]:
         "margin_below_0p02": sum(1 for mg in margins if mg < 0.02),
         "by_type": by_type,
         "by_method": by_method,
+        "needs_review": sum(1 for a in alignments if a.needs_review),
     }

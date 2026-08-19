@@ -121,10 +121,10 @@ def _verify_ids_belong_to(
     a segment not in the expected src/tgt segmented input set."""
     issues = []
     for a in alignments:
-        for sid in a.en:
+        for sid in a.src:
             if sid not in src_ids:
                 issues.append(f"{a.align_id}: src side ID {sid} not in {src_lang} input")
-        for tid in a.zh:
+        for tid in a.tgt:
             if tid not in tgt_ids:
                 issues.append(f"{a.align_id}: tgt side ID {tid} not in {tgt_lang} input")
     return issues
@@ -139,7 +139,7 @@ def _check_no_src_side_duplicates(
     seen: dict[str, str] = {}  # seg_id → align_id first seen in
     dups: list[str] = []
     for a in alignments:
-        for sid in a.en:
+        for sid in a.src:
             if sid in seen and seen[sid] != a.align_id:
                 dups.append(f"{sid} (in {seen[sid]} and {a.align_id})")
             else:
