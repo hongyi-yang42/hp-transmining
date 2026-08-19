@@ -21,13 +21,15 @@ year: 2019
 # heading line (13.8pt; 第N章 with full-width digits for Ch.7-9, ASCII for
 # Ch.10-17): each heading occurs exactly once and this source carries no
 # running headers. Cross-checked against the embedded TOC (Ch.7=p.85 …
-# Ch.17=p.216). Front matter pp.1-4 and the trailing footnote/colophon
-# page p.232 are excluded.
-# novel text ends on p.231 (p.232 is the trailing footnote/colophon page, excluded), so Ch.17 = pp.216-231.
+# Ch.17=p.216). Front matter pp.1-4 are excluded. The novel's final
+# paragraph ends on p.232 — this PDF carries no trailing colophon page —
+# so Ch.17 = pp.216-232. (p.232 was previously mis-filed as a footnote/
+# colophon page and excluded, which truncated the chapter tail: the final
+# King's Cross scene was missing from every derived ZH output.)
 chapter:
   number: 17
   start_page: 216
-  end_page: 231
+  end_page: 232
 
 scan:
   dpi: 300
