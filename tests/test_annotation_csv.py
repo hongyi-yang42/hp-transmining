@@ -133,9 +133,31 @@ def test_fail_closed_on_missing_master_columns(tmp_path: Path) -> None:
 
 
 def test_fail_closed_on_blank_machine_cell(tmp_path: Path) -> None:
-    mod, out, rc = _build(tmp_path, [_master_row("dp1", en_context_text="")])
+    mod, out, rc = _build(tmp_path, [_master_row("dp1", de_sentence_text="")])
     assert rc == 2
     assert not out.exists()
+
+
+def test_blank_context_allowed_for_anchorless_rows(tmp_path: Path) -> None:
+    """An empty context column is legitimate when the DE sentence has no
+    aligned anchor on that side (annotator marks it not_aligned) — the
+    builder must not fail-closed on it, but other machine cells stay
+    strict."""
+    from hp_corpus.annotation_csv import MACHINE_COLUMNS
+
+    mod, out, rc = _build(tmp_path, [_master_row("dp1", en_context_text="", zh_context_text="")])
+    assert rc == 0
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        row = next(csv.DictReader(f))
+    assert row["english_context"] == "" and row["chinese_context"] == ""
+    # Every other machine column still non-blank.
+    strict = [c for c in MACHINE_COLUMNS if c not in ("english_context", "chinese_context")]
+    assert all(row[c] != "" for c in strict)
+
+    # A blank non-context machine cell still fails closed.
+    mod, out2, rc2 = _build(tmp_path / "b", [_master_row("dp1", de_pp_surface="")])
+    assert rc2 == 2
+    assert not out2.exists()
 
 
 def test_refuses_overwrite_without_force(tmp_path: Path) -> None:

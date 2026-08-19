@@ -68,13 +68,17 @@ def read_master_rows(path: Path) -> list[dict[str, str]]:
 
 def build_csv_rows(master_rows: list[dict[str, str]]) -> list[dict[str, str]]:
     """Project master rows into CSV rows (machine columns filled,
-    annotator columns blank). Any blank machine cell fails closed."""
+    annotator columns blank). Any blank machine cell fails closed — except
+    the two context columns, which are legitimately empty when the DE
+    sentence has no aligned anchor on that side (the annotator then marks
+    that side ``not_aligned``)."""
+    blankable = ("english_context", "chinese_context")
     out: list[dict[str, str]] = []
     for r in master_rows:
         row: dict[str, str] = {}
         for master_col, csv_col in MASTER_TO_CSV_COLUMNS.items():
             value = (r.get(master_col) or "").strip()
-            if not value:
+            if not value and csv_col not in blankable:
                 raise ValueError(
                     f"blank machine cell: master column {master_col!r} "
                     f"(CSV column {csv_col!r})"

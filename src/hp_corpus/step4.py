@@ -1148,7 +1148,12 @@ def write_pilot_tsv(
             cand["source_row_sha256"] = compute_source_row_sha256(cand)
             row: dict[str, Any] = {}
             for col in ALL_TSV_COLUMNS:
-                if col in SOURCE_COLUMNS:
+                if col in SOURCE_COLUMNS or col in CONTEXT_COLUMNS:
+                    # Source columns and the retrieval-view context columns
+                    # are both machine-written from the candidate dict. (The
+                    # writer once blanked the context columns — the master
+                    # carried empty *_context_text while the candidates held
+                    # the real windows.)
                     val = cand.get(col, "")
                     if isinstance(val, list):
                         val = json.dumps(val, ensure_ascii=False)
