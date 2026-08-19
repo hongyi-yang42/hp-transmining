@@ -1,9 +1,10 @@
-"""Focused tests for ``scripts/run_alignments_v2.py`` chapter selection.
+"""Focused tests for ``scripts/run_alignments_v2.py`` chapter and pair selection.
 
-The alignment run itself needs the e5-base model and real segmented inputs;
-here we only cover the new backward-compatible ``--chapters`` surface:
-normalisation, range validation, the Ch.1-3 default, and fail-fast on bad
-input (before any output directory is touched).
+The alignment run itself needs the embedding model and real segmented
+inputs; here we only cover the pure selection surface: chapter
+normalisation, range validation, the full-novel default, the production /
+diagnostics pair split, and fail-fast on bad input (before any output
+directory is touched).
 """
 
 from __future__ import annotations
@@ -22,12 +23,20 @@ def _load_script():
     return mod
 
 
-def test_default_is_ch1_3():
+def test_default_is_full_novel():
     mod = _load_script()
-    assert mod.DEFAULT_CHAPTERS == (1, 2, 3)
+    assert mod.DEFAULT_CHAPTERS == tuple(range(1, 18))
     chapters, err = mod.validate_chapters(list(mod.DEFAULT_CHAPTERS))
     assert err is None
-    assert chapters == (1, 2, 3)
+    assert chapters == tuple(range(1, 18))
+
+
+def test_production_pairs_exclude_en_zh():
+    """Downstream reads DE-EN and DE-ZH only; EN-ZH must not run (or gate
+    anything) unless --diagnostics is passed."""
+    mod = _load_script()
+    assert mod.effective_pairs(False) == (("de", "en"), ("de", "zh"))
+    assert mod.effective_pairs(True) == (("de", "en"), ("de", "zh"), ("en", "zh"))
 
 
 def test_validate_chapters_sorts_and_dedupes():

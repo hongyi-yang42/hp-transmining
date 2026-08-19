@@ -26,13 +26,13 @@ Hits are validated against `FILTER_CONTRACTED_123` and `FILTER_PP` from `conll_e
 
 **What a Step 4 datapoint is.** A *specific German PP occurrence* — a token range inside one sentence — together with the EN and ZH sentence(s) aligned to that German sentence. The annotator's task is to identify, inside each aligned sentence, the linguistic expression that corresponds to the German PP and to record its observable form.
 
-**What the Step 4 TSV is — and is not.**
+**What the Step 4 master TSV is — and is not.**
 
-- The output TSV is a **Ch.1–3 paper-eligible annotation pool**. Every surviving occurrence whose canonical preposition is in the paper's 13-item paired inventory is included; nothing is hand-picked.
-- It is **not** the paper's final 96 trilingual contexts. The 96 are hand-selected from the full novel; membership in the 96 is a downstream human decision, not a property of any row in this TSV. `paper_final_sample=false` on every row makes this explicit.
+- The master TSV (`full_novel_annotation_master.tsv`, built by `scripts/build_full_novel_annotation.py`) is the **machine master for the full novel (Ch.1–17)**: every extracted German PP occurrence, both forms, with its EN/ZH aligned anchor text and the retrieval-view context columns. Nothing is hand-picked at this stage.
+- It is **not** the paper's final 96 trilingual contexts. The 96 are hand-selected from the full novel; membership in the 96 is a downstream human decision, not a property of any row. `paper_final_sample=false` on every row makes this explicit.
 - It is **not** a (preposition, noun) type-level analysis. Two occurrences of `im Haus` in the same sentence are two datapoints.
-- `FILTER_CONTRACTED_123` and `FILTER_PP` are extraction QA filters; they appear as the `author_resource_match` source column for visibility but do not gate membership in the pool.
-- It is **not** an automatic translation or definiteness classifier. EN/ZH counterpart spans and form labels are filled by a human annotator. The builder never auto-translates or auto-classifies; `crosslingual_map` proposals live in a separate JSONL and never auto-populate annotation fields.
+- `FILTER_CONTRACTED_123` and `FILTER_PP` are extraction QA filters; they appear as the `author_resource_match` source column for visibility but do not gate membership in the annotation surface (the 13-item paired inventory is applied later, at eligible-pool build — see `FULL_NOVEL_SAMPLING.md`).
+- It is **not** an automatic translation or definiteness classifier. EN/ZH counterpart spans and form labels are filled by a human annotator in the trilingual pair CSV (`ANNOTATION_CSV.md`). The builder never auto-translates or auto-classifies; `crosslingual_map` proposals live in a separate JSONL and never auto-populate annotation fields.
 - It does **not** assign weak/strong definiteness, uniqueness, or familiarity. Only observable surface form is recorded.
 
 ### The 13-item operational inventory
@@ -43,45 +43,41 @@ The contraction table in `src/hp_corpus/step4.py` is pinned to the vendored `tim
 
 ### Sentence alignment
 
-The sentence alignments feeding Step 4 are produced by `src/hp_corpus/align.py` (e5-base embeddings + dynamic programming). They are **assumed correct initially** — the builder writes `{lang}_alignment_qc = assumed_ok` on every row — but checked opportunistically by the annotator while locating counterparts. The annotator may promote the QC flag to `confirmed` (after verifying a counterpart or its absence), or flag it as `incorrect` / `uncertain`, which routes the row to a realignment queue.
+The sentence alignments feeding Step 4 are produced by `src/hp_corpus/align.py` — **LaBSE** embeddings (local checkout under `models/LaBSE`, identity pinned in `config/embedding_models.yaml`) + a global banded DP with a lexical prior. The production pairs are **DE–EN and DE–ZH per chapter** (`scripts/run_alignments_v2.py`, Ch.1–17 by default; EN–ZH exists only as a `--diagnostics` extra with no downstream consumer).
 
-Misalignment and omission are distinct: `omitted` is reserved for "the **correctly-aligned** target context genuinely contains no counterpart". `incorrect` + `omitted` together is a hard validation error (`MISALIGNED_NOT_OMISSION`); a row in doubt must be flagged for realignment, not encoded as omission.
+Machine alignment quality is separated from annotation: alignment records scoring below the review threshold keep `method="embedding_dp"` and carry `needs_review=true` (nothing machine-made is ever labelled `manual`); on the annotation side the human's per-side `*_alignment_confidence` value (`not_aligned`) is the signal that the delivered context is not the right translation.
+
+Misalignment and omission are distinct axes in the annotation CSV: `omitted` + `high`/`medium`/`low` confidence = the correctly-delivered context genuinely contains no counterpart (true omission); `omitted` + `not_aligned` = retrieval failed and the row needs repair, not an omission by the translator (see `ANNOTATION_CSV.md`).
 
 ### Builder input discipline
 
-For Ch.1–3 every requested chapter must contribute a full input set: both contracted and uncontracted extraction TSVs (non-empty body), DE/EN/ZH segmented JSONL, and DE–EN / DE–ZH alignment JSONL. Header-only, empty, or missing inputs raise `MissingInputsError`; an unresolved DE segment id raises `UnresolvedSegmentIdError`. The builder never emits a partial-corpus TSV. The header-only rule is scoped to Ch.1–3; the future Ch.4–17 extension will need an extraction-manifest mechanism to distinguish legitimately-empty chapters from missed runs (out of scope here).
+The full-novel builder takes its chapter list from the extraction manifest (`data/extracted/full_novel/manifest.json`) and fails closed on any gap: a missing manifest, a requested `(chapter, form)` without an `ok` / `zero_hits_ok` entry, or missing/empty segmented or alignment inputs raises before any output is written. The builder never emits a partial master.
 
 ### Module layout
 
-- `src/hp_corpus/step4.py` — pure-Python builder, pilot selector, and TSV writer.
-- `scripts/build_step4_annotation_pack.py` — CLI wrapper that wires file paths (Ch.1–3 method pilot).
-- `tests/test_step4.py` — synthetic-fixture tests; no novel text.
+- `src/hp_corpus/step4.py` — pure-Python candidate/master builder and TSV writer.
+- `scripts/run_full_novel_german_extraction.py` — paper-faithful Ch.1–17 extraction + manifest.
+- `scripts/build_full_novel_annotation.py` — builds the machine master TSV from extraction + segmented + alignment inputs.
+- `scripts/build_annotation_csv.py` / `scripts/validate_annotation_csv.py` — the annotator-facing CSV and its return gate.
+- `tests/test_step4.py`, `tests/test_full_novel_annotation.py` — synthetic-fixture tests; no novel text.
 
-The full-novel annotation surface is the trilingual pair CSV built from the
+The annotator-facing surface is the trilingual pair CSV built from the
 machine master — see [`ANNOTATION_CSV.md`](./ANNOTATION_CSV.md) and
-[`FULL_NOVEL_SAMPLING.md`](./FULL_NOVEL_SAMPLING.md).
+[`FULL_NOVEL_SAMPLING.md`](./FULL_NOVEL_SAMPLING.md). The older Ch.1–3
+10+10 pilot selector (`scripts/build_step4_annotation_pack.py`) remains
+available for method piloting but is not the production path.
 
-### Alignment compatibility
+### Alignment record schema
 
-The current alignment serializer writes both sides of every record under the JSON keys `en` and `zh`, regardless of which languages the file actually pairs. `src/hp_corpus/step4.py` therefore identifies each side by **inspecting the segment IDs** (the language code is the second underscore-separated field) and additionally accepts `source`/`target` and `src`/`tgt` field names for forward compatibility.
+Each alignment record is language-generic: `src`/`tgt` side lists plus `src_lang`/`tgt_lang`, `method` ∈ {`embedding_dp`, `manual`} (`manual` is reserved for genuinely human-created records and never auto-assigned), and a `needs_review` flag. Records written by the pre-rename serializer (`en`/`zh` field names for every pair, `vecalign_labse`) still parse — the schema normalizes them, and `src/hp_corpus/step4.py` identifies sides by segment-ID language prefix either way.
 
 ### Occurrence identity
 
 `datapoint_id` = `dp_ch{NN}_{de_sentence_id}_t{token_start}-{token_end}`. Two occurrences in the same sentence with the same `(preposition, noun)` get different IDs because their token ranges differ.
 
-### Pilot selection (deterministic, no randomness)
-
-The pilot is **10 contracted + 10 uncontracted**, chosen from candidates that have both EN and ZH alignment. Priority:
-
-1. **`minimal_pair`** — groups `(de_prep_normalized, de_head_lemma)` that contain both forms. Each such group contributes at most one contracted + one uncontracted occurrence (the first by stable sort).
-2. **`author_match`** — occurrences whose `author_resource_match` is True (i.e. `(prep, noun)` is in the paper's filter).
-3. **`stable_fill`** — remainder in stable sort order `(chapter, de_sentence_id, de_token_start, de_token_end)`.
-
-If the eligible pool cannot reach 10+10, the builder exits non-zero with a per-form shortfall report.
-
 ### Source-row immutability
 
-Each pilot row carries `source_row_sha256` over the immutable source columns. The validator recomputes the hash and rejects any row whose source columns were edited. Editable columns (annotation fields) live in separate TSV columns and are not covered by the hash.
+Each master row carries `source_row_sha256` over the immutable source columns (the retrieval-context columns are deliberately outside the hash, so the context window can be re-tuned without changing row identity). The returned-CSV validator binds rows by that hash **and** re-derives every machine column from the master for a cell-by-cell comparison — an edited context or German sentence fails closed even when the hash is untouched. Editable columns (annotation fields) live in separate columns and are not covered by the hash.
 
 ### Annotation schema
 
@@ -90,7 +86,7 @@ trilingual pair CSV (column-by-column guide and vocabularies).
 
 ## Output discipline
 
-Per-PP detail goes only to TSV files under `data/extracted/` (gitignored). The Step 4 candidate JSONL and pilot TSV go to `data/derived/step4/` (also gitignored — contains novel text). **Stdout and summary JSON carry aggregate counts only** — never noun lemmas, surface forms, segment IDs, or sentence text. This is verified by:
+Per-PP detail goes only to TSV files under `data/extracted/` (gitignored). The machine master and annotation CSV go to `data/derived/` (also gitignored — contains novel text). **Stdout and summary JSON carry aggregate counts only** — never noun lemmas, surface forms, segment IDs, or sentence text. This is verified by:
 
 - `tests/test_run_paper_extractor.py` — extractor stdout guard.
 - `tests/test_step4.py::test_summary_no_token_text` — Step 4 summary guard.

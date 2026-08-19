@@ -436,8 +436,9 @@ def _load_chapter_order(
 @dataclass
 class _AlignmentSide:
     """One side of an alignment record, identified by segment IDs rather
-    than by JSON key — the same JSONL serializes DE↔EN and DE↔ZH using
-    the same ``en``/``zh`` field names, so the key is unreliable."""
+    than by JSON key — the serializer has changed field names over time
+    (legacy ``en``/``zh`` for every pair; now ``src``/``tgt``), so the key
+    is unreliable and the ID prefix is the source of truth."""
 
     lang: str
     sentence_ids: list[str]
@@ -463,8 +464,9 @@ def _identify_alignment_sides(
 ) -> list[_AlignmentSide]:
     """Walk all known side-key names and bucket their IDs by language.
 
-    The DP-produced JSONL always names both sides (``en``/``zh`` in the
-    current serializer), but a side may be empty for 1:0 / 0:1 records.
+    The current serializer names both sides ``src``/``tgt``; the legacy
+    one wrote ``en``/``zh`` for every language pair. Both are accepted via
+    ``ALIGNMENT_SIDE_KEYS``, and a side may be empty for 1:0 / 0:1 records.
     We:
 
       * identify non-empty sides by segment-ID prefix
@@ -1146,7 +1148,12 @@ def write_pilot_tsv(
             cand["source_row_sha256"] = compute_source_row_sha256(cand)
             row: dict[str, Any] = {}
             for col in ALL_TSV_COLUMNS:
-                if col in SOURCE_COLUMNS:
+                if col in SOURCE_COLUMNS or col in CONTEXT_COLUMNS:
+                    # Source columns and the retrieval-view context columns
+                    # are both machine-written from the candidate dict. (The
+                    # writer once blanked the context columns — the master
+                    # carried empty *_context_text while the candidates held
+                    # the real windows.)
                     val = cand.get(col, "")
                     if isinstance(val, list):
                         val = json.dumps(val, ensure_ascii=False)

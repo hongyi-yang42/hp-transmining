@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import re
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class OCRSpan(BaseModel):
@@ -71,12 +72,39 @@ class Segment(BaseModel):
     source_pages: list[int] = Field(default_factory=list)
 
 
+_SEGMENT_ID_LANG_RE = re.compile(r"^[a-z0-9]+_([a-z]+)_ch\d{2}_p\d{4}_s\d{3}$")
+
+
+def _lang_from_segment_ids(ids: Any) -> str:
+    """Language code carried by the first recognizable segment ID, or ""."""
+    if isinstance(ids, list):
+        for sid in ids:
+            if isinstance(sid, str):
+                m = _SEGMENT_ID_LANG_RE.match(sid)
+                if m:
+                    return m.group(1)
+    return ""
+
+
 class Alignment(BaseModel):
-    """One EN-ZH alignment record."""
+    """One cross-language alignment record for an arbitrary src→tgt pair.
+
+    ``src``/``tgt`` are positional sides (the DP writer puts the first
+    argument on ``src``); the actual languages live in ``src_lang`` /
+    ``tgt_lang`` and in the segment IDs themselves. A ``mode="before"``
+    validator still accepts records written by the pre-rename serializer,
+    which hard-coded the field names ``en``/``zh`` regardless of language
+    and the method value ``vecalign_labse``.
+    """
 
     align_id: str = Field(pattern=r"^a\d+$")
-    en: list[str] = Field(description="List of English Segment IDs")
-    zh: list[str] = Field(description="List of Chinese Segment IDs")
+    src: list[str] = Field(description="Source-side Segment IDs")
+    tgt: list[str] = Field(description="Target-side Segment IDs")
+    # Empty string only on legacy records whose language could not be
+    # derived from segment IDs (e.g. an empty 1:0 side); the DP writer
+    # always fills both.
+    src_lang: str = Field(default="", description="Source language code, e.g. 'de'")
+    tgt_lang: str = Field(default="", description="Target language code, e.g. 'zh'")
     # Grouping types up to arity 5 (max_group): the DP emits any
     # di:dj with 1 < di + dj <= max_group + 1; the Literal is the superset
     # for the largest supported cap (AlignmentConfig.max_group, default 5).
@@ -105,5 +133,33 @@ class Alignment(BaseModel):
     # for e5 (all pairs >= 0.69); the margin is the ranking/review signal.
     # None for records that predate margin support or had no competitor.
     margin: float | None = Field(default=None, ge=0.0)
-    method: Literal["vecalign_labse", "manual"]
+    # "embedding_dp": machine record from this module's DP (regardless of the
+    # embedding model — provenance lives in the run manifest and cache meta).
+    # "manual": reserved for records a human actually created by hand; the
+    # machine writer must never assign it.
+    method: Literal["embedding_dp", "manual"]
+    # Machine flag: confidence below AlignmentConfig.review_threshold. Such
+    # records stay method="embedding_dp" and are queued for human review —
+    # they are NOT manual alignments.
+    needs_review: bool = False
     validated: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_legacy_fields(cls, data: Any) -> Any:
+        """Read records from the pre-rename serializer: `en`/`zh` field
+        names (used for every language pair) and `vecalign_labse` method;
+        derive src/tgt languages from segment IDs when absent."""
+        if not isinstance(data, dict):
+            return data
+        if "src" not in data and "en" in data:
+            data["src"] = data.pop("en")
+        if "tgt" not in data and "zh" in data:
+            data["tgt"] = data.pop("zh")
+        if data.get("method") == "vecalign_labse":
+            data["method"] = "embedding_dp"
+        if not data.get("src_lang"):
+            data["src_lang"] = _lang_from_segment_ids(data.get("src"))
+        if not data.get("tgt_lang"):
+            data["tgt_lang"] = _lang_from_segment_ids(data.get("tgt"))
+        return data

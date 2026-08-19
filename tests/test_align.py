@@ -2,12 +2,15 @@
 
 History: ``align_segments`` originally hardcoded cache keys as ``"en"`` and
 ``"zh"`` (cache v0); a second bug scoped keys only by ``lang + model``,
-causing chapter-to-chapter contamination (cache v1). The current implementation
-(cache v2) is content-addressed: the cache identity is SHA-256(schema_version,
-model_name, lang, scope, ordered_segment_ids, ordered_sentence_texts).
+causing chapter-to-chapter contamination (cache v1); v2 made the identity
+content-addressed; v3 additionally covers the model fingerprint so swapped
+weights under an unchanged model path cannot reuse old vectors. The cache
+identity is SHA-256(schema_version, model_fingerprint, model_name, lang,
+scope, ordered_segment_ids, ordered_sentence_texts).
 
 These tests pin:
-  * cache identity is sensitive to text, ID order, and row count
+  * cache identity is sensitive to text, ID order, row count, and the
+    local model weights
   * malformed / mixed-lang / mixed-chapter / duplicate-ID inputs raise
     ``CacheValidationError`` rather than falling back to a shared key
   * different language pairs and different chapters produce different caches
@@ -16,13 +19,15 @@ These tests pin:
 
 from __future__ import annotations
 
-import sys
+import json
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hp_corpus.align import (
+    CACHE_SCHEMA_VERSION,
     CacheValidationError,
     _build_cache_identity,
     _global_dp_align,
@@ -30,6 +35,7 @@ from hp_corpus.align import (
     _ratio_transform,
     _two_pass_align,
     embed_sentences,
+    model_fingerprint,
 )
 from hp_corpus.schema import Alignment, Segment
 
@@ -53,30 +59,6 @@ def _mk_seg(seg_id: str, text: str) -> Segment:
         sentence=1,
         text=text,
     )
-
-
-@pytest.fixture
-def fake_encoder(monkeypatch):
-    """Install a fake ``sentence_transformers.SentenceTransformer`` so tests
-    exercise the cache logic without loading the real ~1.1 GB e5 model.
-
-    The fake produces a deterministic 4-dim vector per input string (hash-based),
-    so identical inputs yield identical vectors across calls."""
-
-    class FakeModel:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-        def encode(self, inputs, **kwargs):  # type: ignore[no-untyped-def]
-            return np.array(
-                [[float((hash(s + f"|{i}") % 1000) / 1000.0) for i in range(4)] for s in inputs],
-                dtype=np.float32,
-            )
-
-    fake_module = type(sys)("sentence_transformers")
-    fake_module.SentenceTransformer = FakeModel  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
-    return FakeModel
 
 
 # --------------------------------------------------------------------- helpers
@@ -124,7 +106,7 @@ def test_cache_miss_when_text_changes(tmp_path: Path, fake_encoder) -> None:
     embed_sentences(texts_b, ids, tmp_path, model_name="fake/M")
 
     # Two distinct .npy files under the same scope/lang/ subdirectory.
-    npy_files = list((tmp_path / "v2" / "de" / "hp1_de_ch01").glob("*.npy"))
+    npy_files = list((tmp_path / CACHE_SCHEMA_VERSION / "de" / "hp1_de_ch01").glob("*.npy"))
     assert len(npy_files) == 2, f"expected 2 caches (text-a vs text-b), got {npy_files}"
 
 
@@ -150,7 +132,7 @@ def test_stale_row_count_does_not_silently_load(tmp_path: Path, fake_encoder) ->
     # First call: writes a valid cache.
     embed_sentences(texts, ids, tmp_path, model_name="fake/M")
     # Sanity: cache exists.
-    npy_files = list((tmp_path / "v2" / "de" / "hp1_de_ch01").glob("*.npy"))
+    npy_files = list((tmp_path / CACHE_SCHEMA_VERSION / "de" / "hp1_de_ch01").glob("*.npy"))
     assert len(npy_files) == 1
 
     # Corrupt the .npy by overwriting with a wrong-shape array under the
@@ -215,11 +197,11 @@ def test_de_en_and_de_zh_use_different_target_caches(
     align_segments(de, zh, cfg)
 
     # en cache must exist under v2/en/hp1_en_ch01/, zh under v2/zh/hp1_zh_ch01/.
-    assert list((tmp_path / "v2" / "en" / "hp1_en_ch01").glob("*.npy"))
-    assert list((tmp_path / "v2" / "zh" / "hp1_zh_ch01").glob("*.npy"))
+    assert list((tmp_path / CACHE_SCHEMA_VERSION / "en" / "hp1_en_ch01").glob("*.npy"))
+    assert list((tmp_path / CACHE_SCHEMA_VERSION / "zh" / "hp1_zh_ch01").glob("*.npy"))
     # And no en cache file under zh/ or vice versa.
-    assert not list((tmp_path / "v2" / "en").rglob("*hp1_zh*"))
-    assert not list((tmp_path / "v2" / "zh").rglob("*hp1_en*"))
+    assert not list((tmp_path / CACHE_SCHEMA_VERSION / "en").rglob("*hp1_zh*"))
+    assert not list((tmp_path / CACHE_SCHEMA_VERSION / "zh").rglob("*hp1_en*"))
 
 
 def test_different_chapters_use_different_caches(tmp_path: Path, fake_encoder) -> None:
@@ -232,8 +214,8 @@ def test_different_chapters_use_different_caches(tmp_path: Path, fake_encoder) -
     embed_sentences(texts, ids_ch01, tmp_path, model_name="fake/M")
     embed_sentences(texts, ids_ch02, tmp_path, model_name="fake/M")
 
-    ch1_files = list((tmp_path / "v2" / "de" / "hp1_de_ch01").glob("*.npy"))
-    ch2_files = list((tmp_path / "v2" / "de" / "hp1_de_ch02").glob("*.npy"))
+    ch1_files = list((tmp_path / CACHE_SCHEMA_VERSION / "de" / "hp1_de_ch01").glob("*.npy"))
+    ch2_files = list((tmp_path / CACHE_SCHEMA_VERSION / "de" / "hp1_de_ch02").glob("*.npy"))
     assert len(ch1_files) == 1
     assert len(ch2_files) == 1
     assert ch1_files[0].name != ch2_files[0].name
@@ -273,6 +255,121 @@ def test_cache_identity_invariant_to_call_order(tmp_path: Path, fake_encoder) ->
     assert files_order1 == files_order2, (
         f"cache layout depends on call order:\n order1={files_order1}\n order2={files_order2}"
     )
+
+
+# --------------------------------------------------------------------- fingerprints
+
+
+def _mk_model_dir(tmp_path: Path, weights: bytes = b"synthetic-weights-v1") -> Path:
+    d = tmp_path / "fake_model"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{}", encoding="utf-8")
+    (d / "model.safetensors").write_bytes(weights)
+    return d
+
+
+def test_model_fingerprint_local_dir_tracks_content(tmp_path: Path) -> None:
+    """Swapping weights under the same model path must change the
+    fingerprint — the whole point of fingerprints (models/ is gitignored;
+    only the local files can prove what produced the vectors)."""
+    d1 = _mk_model_dir(tmp_path)
+    fp1 = model_fingerprint(str(d1), tmp_path / "cache")
+    assert fp1 and fp1 != f"id:{d1}"
+    # Same content re-read (memoized): stable.
+    assert model_fingerprint(str(d1), tmp_path / "cache") == fp1
+
+    d2 = _mk_model_dir(tmp_path / "other", weights=b"different-weights")
+    # Same mtime/size profile as d1's would be a memo collision; force
+    # distinct mtimes so the stat-keyed memo cannot mask the change.
+    os.utime(d2 / "model.safetensors", (1_000_000, 2_000_000))
+    fp2 = model_fingerprint(str(d2), tmp_path / "cache")
+    assert fp2 != fp1
+
+
+def test_model_fingerprint_hub_id_degrades_to_id_string(tmp_path: Path) -> None:
+    """A model name with no local directory (HF hub id) has nothing local
+    to pin; the fingerprint degrades to a stable id string."""
+    assert model_fingerprint("intfloat/multilingual-e5-base", tmp_path) == (
+        "id:intfloat/multilingual-e5-base"
+    )
+
+
+def test_model_fingerprint_memoized_by_stats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unchanged (size, mtime) profile must skip re-hashing the weights."""
+    import hp_corpus.align as align_mod
+
+    calls = {"n": 0}
+    real_hash = align_mod._hash_file
+
+    def counting_hash(path: Path) -> str:
+        calls["n"] += 1
+        return real_hash(path)
+
+    monkeypatch.setattr(align_mod, "_hash_file", counting_hash)
+    d = _mk_model_dir(tmp_path)
+    model_fingerprint(str(d), tmp_path / "cache")
+    cold = calls["n"]
+    assert cold >= 2  # config + weights
+    model_fingerprint(str(d), tmp_path / "cache")
+    assert calls["n"] == cold  # warm call hashes nothing
+
+
+def test_cache_identity_includes_fingerprint() -> None:
+    ids = _ids("de", 1, 2)
+    texts = _texts(2)
+    a = _build_cache_identity(ids, texts, "models/LaBSE", "fp-aaa")
+    b = _build_cache_identity(ids, texts, "models/LaBSE", "fp-bbb")
+    assert a.digest != b.digest
+    assert _build_cache_identity(ids, texts, "models/LaBSE", "fp-aaa").digest == a.digest
+
+
+def test_pinned_fingerprint_mismatch_fails_closed(
+    tmp_path: Path, fake_encoder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When config/embedding_models.yaml pins this model, a different local
+    fingerprint must refuse to embed (fail closed) — for cache hits too,
+    since the identity is checked before lookup."""
+    import hp_corpus.align as align_mod
+
+    d = _mk_model_dir(tmp_path)
+    fp = model_fingerprint(str(d), tmp_path / "cache")
+    manifest = tmp_path / "embedding_models.yaml"
+    manifest.write_text(
+        f'models:\n  - model_name: {d}\n    fingerprint: "{"0" * 64}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(align_mod, "_EMBEDDING_MODELS_MANIFEST", manifest)
+
+    with pytest.raises(CacheValidationError, match="fingerprint mismatch"):
+        embed_sentences(_texts(2), _ids("de", 1, 2), tmp_path / "cache", str(d))
+
+    manifest.write_text(
+        f'models:\n  - model_name: {d}\n    fingerprint: "{fp}"\n',
+        encoding="utf-8",
+    )
+    embed_sentences(_texts(2), _ids("de", 1, 2), tmp_path / "cache", str(d))
+
+
+def test_align_segments_exposes_cache_identities(tmp_path: Path, fake_encoder) -> None:
+    """The returned identities must be the cache files actually written —
+    manifests record these instead of globbing the cache directory."""
+    from hp_corpus.align import AlignmentConfig, align_segments
+
+    de = [_mk_seg("hp1_de_ch01_p0001_s001", "alpha de")]
+    en = [_mk_seg("hp1_en_ch01_p0001_s001", "alpha en")]
+    cfg = AlignmentConfig(embed_cache_dir=tmp_path, model_name="fake/M")
+    run = align_segments(de, en, cfg)
+
+    for identity in (run.src_identity, run.tgt_identity):
+        scope_dir = tmp_path / CACHE_SCHEMA_VERSION / identity.lang / identity.scope
+        assert (scope_dir / f"{identity.digest16}.npy").exists()
+        meta = json.loads(
+            (scope_dir / f"{identity.digest16}.meta.json").read_text(encoding="utf-8")
+        )
+        assert meta["digest"] == identity.digest
+    assert run.src_identity.lang == "de" and run.tgt_identity.lang == "en"
 
 
 # --------------------------------------------------------------------- DP scoring
@@ -321,25 +418,64 @@ def test_dp_margin_nonnegative_and_present() -> None:
     assert margins and all(m >= -1e-9 for m in margins)
 
 
-def test_alignment_schema_margin_optional_for_old_records() -> None:
-    """Alignment records written before the margin field existed (no margin
-    key) must still validate, with margin defaulting to None."""
+def test_alignment_schema_legacy_records_normalize() -> None:
+    """Records from the pre-rename serializer (field names hard-coded
+    en/zh for every language pair, method "vecalign_labse", no
+    margin/lang/needs_review keys) must normalize to the current schema:
+    sides mapped positionally to src/tgt, method normalized, languages
+    derived from segment IDs, margin None, needs_review False."""
     rec = Alignment.model_validate_json(
-        '{"align_id":"a0001","en":["hp1_en_ch01_p0001_s001"],'
+        '{"align_id":"a0001","en":["hp1_de_ch01_p0001_s001"],'
         '"zh":["hp1_zh_ch01_p0001_s001"],"type":"1:1","confidence":0.8,'
         '"method":"vecalign_labse","validated":false}'
     )
+    assert rec.src == ["hp1_de_ch01_p0001_s001"]
+    assert rec.tgt == ["hp1_zh_ch01_p0001_s001"]
+    assert rec.src_lang == "de"
+    assert rec.tgt_lang == "zh"
+    assert rec.method == "embedding_dp"
     assert rec.margin is None
+    assert rec.needs_review is False
     rec2 = Alignment(
         align_id="a0002",
-        en=["hp1_en_ch01_p0001_s002"],
-        zh=["hp1_zh_ch01_p0001_s002"],
+        src=["hp1_de_ch01_p0001_s002"],
+        tgt=["hp1_en_ch01_p0001_s002"],
+        src_lang="de",
+        tgt_lang="en",
         type="1:1",
         confidence=0.8,
-        method="vecalign_labse",
+        method="embedding_dp",
         margin=0.12,
     )
     assert rec2.margin == pytest.approx(0.12)
+
+
+@pytest.mark.parametrize("score,expected_review", [(0.3, True), (0.9, False)])
+def test_low_confidence_flags_needs_review_not_manual(
+    tmp_path: Path, fake_encoder, monkeypatch, score: float, expected_review: bool
+) -> None:
+    """A machine record scoring below review_threshold must stay
+    method="embedding_dp" with needs_review=True — never relabeled
+    "manual", since no human aligned it."""
+    from hp_corpus.align import AlignmentConfig, align_segments
+
+    de = [_mk_seg("hp1_de_ch01_p0001_s001", "alpha de")]
+    en = [_mk_seg("hp1_en_ch01_p0001_s001", "alpha en")]
+
+    monkeypatch.setattr(
+        "hp_corpus.align._global_dp_align",
+        lambda *a, **k: [([0], [0], score, None)],
+    )
+
+    cfg = AlignmentConfig(embed_cache_dir=tmp_path, model_name="fake/M")
+    records = align_segments(de, en, cfg).records
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.method == "embedding_dp"
+    assert rec.needs_review is expected_review
+    assert rec.src_lang == "de" and rec.tgt_lang == "en"
+    assert rec.src[0].startswith("hp1_de_")
+    assert rec.tgt[0].startswith("hp1_en_")
 
 
 # --------------------------------------------------------------------- lexical prior

@@ -1,7 +1,9 @@
 """The annotator-facing trilingual pair CSV: single source of schema.
 
-One CSV, one pass: each row is a German PP occurrence with its aligned
-English and Chinese context, and the annotator fills the German
+One CSV, one pass: each row is a German PP occurrence with its English and
+Chinese **retrieval context** (the aligned anchor sentence group expanded
+by a bounded window in corpus order — the master's ``*_context_text``
+columns, not the bare anchor), and the annotator fills the German
 validity decision plus the EN/ZH counterpart marking in the same file.
 The returned file is the single review source for the eligible-pool
 CLI (``scripts/build_eligible_pool.py --review-csv``).
@@ -104,7 +106,10 @@ ALIGNMENT_CONFIDENCES: frozenset[str] = frozenset(
 )
 
 # master column -> CSV machine column (used by the builder and the
-# returned-file hash check).
+# returned-file integrity check). The context columns are the retrieval
+# view (anchor ± window), not the bare aligned anchor — annotators need
+# the surrounding sentences to locate counterparts that the strict DP
+# left outside the anchor group.
 MASTER_TO_CSV_COLUMNS: dict[str, str] = {
     "datapoint_id": "id",
     "chapter": "chapter",
@@ -112,8 +117,8 @@ MASTER_TO_CSV_COLUMNS: dict[str, str] = {
     "de_pp_surface": "german_pp",
     "de_head_lemma": "german_head_lemma",
     "de_sentence_text": "german_sentence",
-    "en_aligned_text": "english_context",
-    "zh_aligned_text": "chinese_context",
+    "en_context_text": "english_context",
+    "zh_context_text": "chinese_context",
     "source_row_sha256": "row_hash",
 }
 

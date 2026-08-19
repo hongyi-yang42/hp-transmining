@@ -523,6 +523,39 @@ def test_context_window_expands_anchor_and_is_hash_invisible(tmp_path: Path) -> 
     assert compute_source_row_sha256(mutated) == h
 
 
+def test_write_pilot_tsv_emits_context_columns(tmp_path: Path) -> None:
+    """Regression: the TSV writer once blanked the CONTEXT_COLUMNS — the
+    master carried empty *_context_text while the candidates held the real
+    windows, so the retrieval view never reached any consumer."""
+    import csv
+    import json as json_mod
+
+    from hp_corpus.step4 import write_pilot_tsv
+
+    paths = _build_synth_repo(tmp_path)
+    candidates = build_candidates(
+        extraction_dir=paths["extraction_dir"],
+        segmented_dir=paths["segmented_dir"],
+        aligned_dir=paths["aligned_dir"],
+        chapters=[1],
+    )
+    cand = next(
+        c
+        for c in candidates
+        if c["de_source_segment_id"] == "hp1_de_ch01_p0003_s001" and c["de_form"] == "uncontracted"
+    )
+    out = tmp_path / "master.tsv"
+    write_pilot_tsv([cand], out)
+    with open(out, encoding="utf-8", newline="") as f:
+        row = next(csv.DictReader(f, delimiter="\t"))
+    assert json_mod.loads(row["zh_context_ids"]) == [
+        "hp1_zh_ch01_p0003_s001",
+        "hp1_zh_ch01_p0004_s001",
+        "hp1_zh_ch01_p0005_s001",
+    ]
+    assert row["zh_context_text"] == "synth ZH three synth ZH four synth ZH five"
+
+
 def test_one_to_two_alignment_preserved(tmp_path: Path) -> None:
     paths = _build_synth_repo(tmp_path)
     candidates = build_candidates(

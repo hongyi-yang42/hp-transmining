@@ -1,19 +1,22 @@
-"""Run chapter-pair alignments on cache v2, write per-pair manifests,
-and run cross-pair verifications.
+"""Run chapter-pair alignments, write per-pair manifests, and (optionally)
+cross-pair diagnostics.
 
-By default this covers the original Ch.1-3 pilot (9 pairs). Pass
-``--chapters 4 5 ... 17`` (or the full ``1 ... 17`` for the whole novel,
-51 pairs) to extend coverage — every requested chapter must already have
-segmented output for all three languages.
+The production path is the DE-centred triangle the annotation pack consumes:
+DE–EN and DE–ZH per chapter (``--chapters`` defaults to the full novel,
+Ch.1–17 → 34 alignments). EN–ZH has no downstream consumer; pass
+``--diagnostics`` to also produce it and run the cross-pair
+confidence-uniqueness check — a cache-contamination heuristic whose result
+is advisory only and never gates the exit code.
 
 Outputs (all gitignored under ``data/derived/alignment_v2/``):
   * ``hp1_{src}_{tgt}_ch{NN}.jsonl`` — the alignment records (also copied to
     ``data/aligned/`` for use by downstream steps)
   * ``hp1_{src}_{tgt}_ch{NN}.manifest.json`` — input identity, segment
-    counts, cache digests, alignment type counts, missing count, confidence
+    counts, the full effective AlignmentConfig, the exact cache identities
+    used per side, alignment type counts, missing count, confidence
     aggregates
-  * ``cross_pair_uniqueness.json`` — per-chapter check that the three
-    pairwise confidence vectors are mutually distinct
+  * ``cross_pair_uniqueness.json`` — with ``--diagnostics``: per-chapter
+    check that the three pairwise confidence vectors are mutually distinct
 
 Stdout: aggregate counts only — never novel text, never segment IDs from
 the source novels (only the input/output file names and aggregate metrics).
@@ -21,7 +24,7 @@ the source novels (only the input/output file names and aggregate metrics).
 Usage:
     uv run python scripts/run_alignments_v2.py [--force-recompute]
     uv run python scripts/run_alignments_v2.py --chapters 1 2 3
-    uv run python scripts/run_alignments_v2.py --chapters $(seq 1 17)
+    uv run python scripts/run_alignments_v2.py --diagnostics
 """
 
 from __future__ import annotations
@@ -30,10 +33,12 @@ import argparse
 import json
 import statistics
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from hp_corpus.align import (
+    CACHE_SCHEMA_VERSION,
     AlignmentConfig,
     align_segments,
     load_segments,
@@ -45,11 +50,19 @@ SEGMENTED_DIR = Path("data/segmented")
 ALIGNED_DIR = Path("data/aligned")
 MANIFEST_DIR = Path("data/derived/alignment_v2")
 EMBED_DIR = Path("data/embeddings")
-DEFAULT_CHAPTERS = (1, 2, 3)
+DEFAULT_CHAPTERS = tuple(range(1, 18))
 MIN_CHAPTER = 1
 MAX_CHAPTER = 17
-PAIRS = (("de", "en"), ("de", "zh"), ("en", "zh"))
+# Production pairs: everything downstream (step4 master, cross-lingual map,
+# annotation CSV) reads DE–EN and DE–ZH only. EN–ZH is diagnostics-only.
+PRODUCTION_PAIRS = (("de", "en"), ("de", "zh"))
+DIAGNOSTIC_PAIRS = (("en", "zh"),)
 MODEL_NAME = "models/LaBSE"  # canonical since 2026-08-18 judge audit; e5 runs: set gap 0.1
+
+
+def effective_pairs(diagnostics: bool) -> tuple[tuple[str, str], ...]:
+    """Production pairs always; EN–ZH only under --diagnostics."""
+    return PRODUCTION_PAIRS + (DIAGNOSTIC_PAIRS if diagnostics else ())
 
 
 def validate_chapters(values: list[int]) -> tuple[tuple[int, ...], str | None]:
@@ -97,23 +110,6 @@ def _type_counts(alignments: list[Alignment]) -> dict[str, int]:
     return out
 
 
-def _find_cache_digest(lang: str, scope: str) -> str | None:
-    """Locate the content-addressed cache file (digest16 prefix) written for
-    a given lang/scope under the v2/ namespace."""
-    scope_dir = EMBED_DIR / "v2" / lang / scope
-    if not scope_dir.exists():
-        return None
-    metas = sorted(scope_dir.glob("*.meta.json"))
-    if not metas:
-        return None
-    # Read the first meta's full digest.
-    try:
-        meta = json.loads(metas[0].read_text(encoding="utf-8"))
-        return meta.get("digest")
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
 def _verify_ids_belong_to(
     alignments: list[Alignment], src_ids: set[str], tgt_ids: set[str], src_lang: str, tgt_lang: str
 ) -> list[str]:
@@ -121,10 +117,10 @@ def _verify_ids_belong_to(
     a segment not in the expected src/tgt segmented input set."""
     issues = []
     for a in alignments:
-        for sid in a.en:
+        for sid in a.src:
             if sid not in src_ids:
                 issues.append(f"{a.align_id}: src side ID {sid} not in {src_lang} input")
-        for tid in a.zh:
+        for tid in a.tgt:
             if tid not in tgt_ids:
                 issues.append(f"{a.align_id}: tgt side ID {tid} not in {tgt_lang} input")
     return issues
@@ -139,7 +135,7 @@ def _check_no_src_side_duplicates(
     seen: dict[str, str] = {}  # seg_id → align_id first seen in
     dups: list[str] = []
     for a in alignments:
-        for sid in a.en:
+        for sid in a.src:
             if sid in seen and seen[sid] != a.align_id:
                 dups.append(f"{sid} (in {seen[sid]} and {a.align_id})")
             else:
@@ -161,7 +157,8 @@ def run_one(src_lang: str, tgt_lang: str, chapter: int, force: bool) -> dict[str
         model_name=MODEL_NAME,
         force_recompute=force,
     )  # gap/multi penalties + arity come from AlignmentConfig defaults
-    alignments = align_segments(src, tgt, cfg)
+    run = align_segments(src, tgt, cfg)
+    alignments = run.records
 
     # Write alignment JSONL to BOTH the canonical data/aligned/ path (used by
     # Step 4 builder) and reflect the same file in the v2 manifest dir.
@@ -170,11 +167,6 @@ def run_one(src_lang: str, tgt_lang: str, chapter: int, force: bool) -> dict[str
 
     src_ids = {s.id for s in src}
     tgt_ids = {s.id for s in tgt}
-    src_scope = f"hp1_{src_lang}_{ch}"
-    tgt_scope = f"hp1_{tgt_lang}_{ch}"
-
-    src_cache_digest = _find_cache_digest(src_lang, src_scope)
-    tgt_cache_digest = _find_cache_digest(tgt_lang, tgt_scope)
 
     confidences = [a.confidence for a in alignments]
     type_counts = _type_counts(alignments)
@@ -199,14 +191,25 @@ def run_one(src_lang: str, tgt_lang: str, chapter: int, force: bool) -> dict[str
             "segment_count": len(tgt),
             "id_digest_sha256": _id_digest([s.id for s in tgt]),
         },
+        # The full effective config, so a manifest alone reproduces the run's
+        # semantics (penalties, priors, arity — not just model + gap).
+        "alignment_config": asdict(cfg),
+        # Cache identities come from the run itself — never re-discovered by
+        # listing the cache directory (multiple models coexist there).
         "embedding_cache": {
-            "schema_version": "v2",
+            "schema_version": CACHE_SCHEMA_VERSION,
             "model_name": MODEL_NAME,
-            "gap_penalty": cfg.gap_penalty,
-            "src_scope": src_scope,
-            "tgt_scope": tgt_scope,
-            "src_cache_digest": src_cache_digest,
-            "tgt_cache_digest": tgt_cache_digest,
+            "model_fingerprint": run.src_identity.model_fingerprint,
+            "src": {
+                "scope": run.src_identity.scope,
+                "lang": run.src_identity.lang,
+                "digest": run.src_identity.digest,
+            },
+            "tgt": {
+                "scope": run.tgt_identity.scope,
+                "lang": run.tgt_identity.lang,
+                "digest": run.tgt_identity.digest,
+            },
         },
         "output": {
             "path": str(out_aligned),
@@ -231,10 +234,10 @@ def run_one(src_lang: str, tgt_lang: str, chapter: int, force: bool) -> dict[str
 def _cross_pair_uniqueness(chapter: int) -> dict[str, Any]:
     """Verify that for one chapter, the three pairwise alignment confidence
     vectors are mutually distinct (not byte-identical, which would indicate
-    cache reuse)."""
+    cache reuse). Diagnostics only."""
     ch = f"ch{chapter:02d}"
     pairs = {}
-    for src, tgt in PAIRS:
+    for src, tgt in effective_pairs(diagnostics=True):
         path = ALIGNED_DIR / f"hp1_{src}_{tgt}_{ch}.jsonl"
         if not path.exists():
             return {"chapter": chapter, "error": f"missing {path.name}"}
@@ -280,6 +283,13 @@ def main(argv: list[str] | None = None) -> int:
         help=(f"chapters to align, {MIN_CHAPTER}..{MAX_CHAPTER} "
               f"(default: {' '.join(map(str, DEFAULT_CHAPTERS))})"),
     )
+    ap.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="also align EN-ZH (no downstream consumer) and run the "
+             "cross-pair confidence-uniqueness check — advisory output "
+             "that never gates the exit code",
+    )
     args = ap.parse_args(argv)
 
     chapters, err = validate_chapters(args.chapters)
@@ -287,19 +297,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 2
 
+    pairs = effective_pairs(args.diagnostics)
     MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
     ALIGNED_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"running {len(PAIRS) * len(chapters)} alignments on cache v2 "
-          f"(ch{chapters[0]:02d}..ch{chapters[-1]:02d})...")
+    print(f"running {len(pairs) * len(chapters)} alignments on cache "
+          f"{CACHE_SCHEMA_VERSION} (ch{chapters[0]:02d}..ch{chapters[-1]:02d})...")
     manifests = []
     for chapter in chapters:
-        for src_lang, tgt_lang in PAIRS:
+        for src_lang, tgt_lang in pairs:
             m = run_one(src_lang, tgt_lang, chapter, args.force_recompute)
             manifests.append(m)
             ch = f"ch{chapter:02d}"
             mani_path = MANIFEST_DIR / f"hp1_{src_lang}_{tgt_lang}_{ch}.manifest.json"
-            mani_path.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+            mani_path.write_text(
+                json.dumps(m, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+            )
             v = m["verification"]
             print(
                 f"  {src_lang}->{tgt_lang} {ch}: "
@@ -310,25 +323,28 @@ def main(argv: list[str] | None = None) -> int:
                 f"src_dups={v['src_side_duplicate_count']}"
             )
 
-    print("\ncross-pair confidence uniqueness:")
-    overlaps = []
-    all_unique = True
-    for chapter in chapters:
-        chk = _cross_pair_uniqueness(chapter)
-        overlaps.append(chk)
-        for pair_key, info in chk["overlap_in_first_min_len"].items():
-            ok = info["status"] == "OK"
-            all_unique = all_unique and ok
-            print(
-                f"  ch{chapter:02d} {pair_key}: "
-                f"{info['matches']}/{info['compared']} matches "
-                f"(rate={info['match_rate']}) ({'OK' if ok else 'FAIL'})"
-            )
-    (MANIFEST_DIR / "cross_pair_uniqueness.json").write_text(
-        json.dumps(overlaps, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    if args.diagnostics:
+        print("\ncross-pair confidence uniqueness (diagnostic, advisory):")
+        overlaps = []
+        all_unique = True
+        for chapter in chapters:
+            chk = _cross_pair_uniqueness(chapter)
+            overlaps.append(chk)
+            for pair_key, info in chk["overlap_in_first_min_len"].items():
+                ok = info["status"] == "OK"
+                all_unique = all_unique and ok
+                print(
+                    f"  ch{chapter:02d} {pair_key}: "
+                    f"{info['matches']}/{info['compared']} matches "
+                    f"(rate={info['match_rate']}) ({'OK' if ok else 'FAIL'})"
+                )
+        (MANIFEST_DIR / "cross_pair_uniqueness.json").write_text(
+            json.dumps(overlaps, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"uniqueness: {'OK' if all_unique else 'FAIL'} (advisory)")
 
-    # Aggregate verification summary
+    # Aggregate verification summary — production checks only; EN-ZH and the
+    # uniqueness heuristic never gate the exit code.
     n_verifications_ok = sum(
         1
         for m in manifests
@@ -337,9 +353,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"\nverification: {n_verifications_ok}/{len(manifests)} alignments pass "
-        f"all checks; cross-pair uniqueness: {'OK' if all_unique else 'FAIL'}"
+        f"all checks"
     )
-    return 0 if (n_verifications_ok == len(manifests) and all_unique) else 1
+    return 0 if n_verifications_ok == len(manifests) else 1
 
 
 if __name__ == "__main__":

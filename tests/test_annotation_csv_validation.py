@@ -21,7 +21,7 @@ def _load_script(name):
     return mod
 
 
-def _write_master(path: Path, ids: list[str]) -> Path:
+def _write_master(path: Path, ids: list[str], values: dict | None = None) -> Path:
     from hp_corpus.step4 import ALL_TSV_COLUMNS
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,16 +29,16 @@ def _write_master(path: Path, ids: list[str]) -> Path:
         w = csv.DictWriter(f, fieldnames=list(ALL_TSV_COLUMNS), delimiter="\t")
         w.writeheader()
         for dp in ids:
-            w.writerow(
-                {
-                    col: dp
-                    if col == "datapoint_id"
-                    else "a" * 64
-                    if col == "source_row_sha256"
-                    else ""
-                    for col in ALL_TSV_COLUMNS
-                }
-            )
+            row = {
+                col: dp
+                if col == "datapoint_id"
+                else "a" * 64
+                if col == "source_row_sha256"
+                else ""
+                for col in ALL_TSV_COLUMNS
+            }
+            row.update((values or {}).get(dp, {}))
+            w.writerow(row)
     return path
 
 
@@ -140,6 +140,52 @@ def test_master_row_missing_fails(tmp_path: Path) -> None:
 def test_row_hash_mismatch_fails(tmp_path: Path) -> None:
     master = _write_master(tmp_path / "master.tsv", ["dp1"])
     csv_path = _write_csv(tmp_path / "returned.csv", [_filled_row("dp1", row_hash="b" * 64)])
+    assert _run_validate(csv_path, master) == 2
+
+
+def test_edited_machine_column_fails_even_with_intact_hash(tmp_path: Path, capsys) -> None:
+    """An annotator who edits english_context (but not row_hash) must be
+    caught: every machine column is re-derived from the master and
+    compared cell by cell, not just the hash string."""
+    master = _write_master(
+        tmp_path / "master.tsv",
+        ["dp1"],
+        {
+            "dp1": {
+                "chapter": "3",
+                "de_form": "contracted",
+                "de_pp_surface": "im Haus",
+                "de_head_lemma": "Haus",
+                "de_sentence_text": "Er ging ins Haus.",
+                "en_context_text": "He went into the house.",
+                "zh_context_text": "他走进了房子。",
+            }
+        },
+    )
+    row = _filled_row("dp1")
+    row.update(
+        {
+            "chapter": "3",
+            "form": "contracted",
+            "german_pp": "im Haus",
+            "german_head_lemma": "Haus",
+            "german_sentence": "Er ging ins Haus.",
+            "english_context": "He went into the EDITED house.",  # tampered
+            "chinese_context": "他走进了房子。",
+        }
+    )
+    csv_path = _write_csv(tmp_path / "returned.csv", [row])
+    assert _run_validate(csv_path, master) == 2
+    assert "MACHINE_COLUMN_EDITED" in capsys.readouterr().out
+
+
+def test_form_requires_alignment_confidence(tmp_path: Path) -> None:
+    """A set form must carry the human alignment confidence — otherwise
+    `omitted` could not be told apart from retrieval failure."""
+    master = _write_master(tmp_path / "master.tsv", ["dp1"])
+    csv_path = _write_csv(
+        tmp_path / "returned.csv", [_filled_row("dp1", en_alignment_confidence="")]
+    )
     assert _run_validate(csv_path, master) == 2
 
 
