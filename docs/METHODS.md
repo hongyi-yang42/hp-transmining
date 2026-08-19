@@ -43,7 +43,7 @@ The contraction table in `src/hp_corpus/step4.py` is pinned to the vendored `tim
 
 ### Sentence alignment
 
-The sentence alignments feeding Step 4 are produced by `src/hp_corpus/align.py` — **LaBSE** embeddings (local checkout under `models/LaBSE`, identity pinned in `config/embedding_models.yaml`) + a global banded DP with a lexical prior. The production pairs are **DE–EN and DE–ZH per chapter** (`scripts/run_alignments_v2.py`, Ch.1–17 by default; EN–ZH exists only as a `--diagnostics` extra with no downstream consumer).
+The sentence alignments feeding Step 4 are produced by `src/hp_corpus/align.py` — **LaBSE** embeddings (local checkout under `models/LaBSE`, identity pinned in `config/embedding_models.yaml`) + a global banded DP with a lexical prior. The selection of LaBSE over e5-base and bge-m3, and the gold-standard audit behind it, are documented in [`ALIGNMENT_MODEL_DECISION.md`](./ALIGNMENT_MODEL_DECISION.md). The production pairs are **DE–EN and DE–ZH per chapter** (`scripts/run_alignments_v2.py`, Ch.1–17 by default; EN–ZH exists only as a `--diagnostics` extra with no downstream consumer).
 
 Machine alignment quality is separated from annotation: alignment records scoring below the review threshold keep `method="embedding_dp"` and carry `needs_review=true` (nothing machine-made is ever labelled `manual`); on the annotation side the human's per-side `*_alignment_confidence` value (`not_aligned`) is the signal that the delivered context is not the right translation.
 
