@@ -112,6 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         default=list(range(MIN_CHAPTER, MAX_CHAPTER + 1)),
     )
+    ap.add_argument(
+        "--context-fallback-plan",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON mapping datapoint_id -> {en|zh: [expected-locus "
+            "segment ids]} from the retrieval-context review. Sides whose "
+            "expected locus falls outside the computed context are flagged "
+            "manual_review in the master (see scripts/check_context_regression.py)."
+        ),
+    )
     ap.add_argument("--force-output", action="store_true")
     args = ap.parse_args(argv)
 
@@ -154,6 +165,21 @@ def main(argv: list[str] | None = None) -> int:
         return _fail("OUTPUT_EXISTS", f"{out_tsv}; pass --force-output to overwrite")
 
     # --- Build -------------------------------------------------------------
+    fallback_plan = None
+    if args.context_fallback_plan is not None:
+        if not args.context_fallback_plan.exists():
+            return _fail("FALLBACK_PLAN_ABSENT", str(args.context_fallback_plan))
+        import json
+
+        with open(args.context_fallback_plan, encoding="utf-8") as f:
+            fallback_plan = json.load(f)
+        if isinstance(fallback_plan, dict) and "cases" in fallback_plan:
+            # The regression manifest wraps the plan in metadata; the
+            # builder consumes the bare datapoint_id -> {side: [ids]} map.
+            fallback_plan = fallback_plan["cases"]
+        if not isinstance(fallback_plan, dict):
+            return _fail("FALLBACK_PLAN_INVALID", "expected a JSON object")
+
     try:
         candidates = build_candidates(
             extraction_dir=args.extraction_dir,
@@ -161,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
             aligned_dir=args.aligned_dir,
             chapters=chapters,
             zero_hits_ok=frozenset(zero_hits_ok),
+            fallback_plan=fallback_plan,
         )
     except MissingInputsError as exc:
         return _fail("MISSING_INPUTS", f"{len(exc.missing)} input file(s) {exc.kind} or malformed")
@@ -169,6 +196,11 @@ def main(argv: list[str] | None = None) -> int:
 
     pool, pool_summary = select_ch1_3_annotation_pool(candidates)
     write_pilot_tsv(pool, out_tsv, scope_override=ANNOTATION_MASTER_SCOPE)
+
+    provenance_counts = {
+        "en": Counter(c["en_context_provenance"] for c in pool),
+        "zh": Counter(c["zh_context_provenance"] for c in pool),
+    }
 
     by_status = Counter(
         statuses[(ch, form)] for ch in chapters for form in ("contracted", "uncontracted")
@@ -184,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         "ineligible_by_form": pool_summary["dropped_by_form"],
         "by_form_in_pool": pool_summary["by_form"],
         "by_chapter_in_pool": pool_summary["by_chapter"],
+        "context_provenance_by_side": {
+            side: dict(sorted(counts.items())) for side, counts in provenance_counts.items()
+        },
         "shared_prepositions": pool_summary["shared_prepositions"],
         "minimal_pair_groups_in_pool": pool_summary["minimal_pair_groups_in_sample"],
         "minimal_pair_groups_with_both_forms": pool_summary["minimal_pair_groups_with_both_forms"],
@@ -210,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  contracted:   {pool_summary['by_form']['contracted']}")
     print(f"  uncontracted: {pool_summary['by_form']['uncontracted']}")
     print(f"  by chapter: {pool_summary['by_chapter']}")
+    prov_repr = {side: dict(sorted(c.items())) for side, c in provenance_counts.items()}
+    print(f"context provenance: {prov_repr}")
     print("outputs:")
     print(f"  {out_tsv}")
     print(f"  {out_summary}")

@@ -20,6 +20,7 @@ Controlled vocabularies are enforced by
 
 from __future__ import annotations
 
+from hp_corpus.candidates import CONTEXT_PROVENANCES
 from hp_corpus.sampling import REVIEW_DECISIONS
 
 # Machine-filled columns (order = column order in the CSV).
@@ -31,7 +32,9 @@ MACHINE_COLUMNS: tuple[str, ...] = (
     "german_head_lemma",  # machine lemma; reference for de_corrected_lemma
     "german_sentence",
     "english_context",
+    "english_context_provenance",  # how the EN context was retrieved
     "chinese_context",
+    "chinese_context_provenance",  # how the ZH context was retrieved
     "row_hash",  # = master source_row_sha256; annotators ignore
 )
 
@@ -105,11 +108,29 @@ ALIGNMENT_CONFIDENCES: frozenset[str] = frozenset(
     {"high", "medium", "low", "not_aligned"}
 )
 
+# Cells starting with these characters make spreadsheet apps parse the
+# cell as a formula (Excel renders "- text" as #NAME? and destroys the
+# text on save). The writer prefixes such cells with a single space.
+_EXCEL_UNSAFE_PREFIXES = ("=", "+", "-", "@")
+
+
+def excel_safe(cell: str) -> str:
+    """Prefix one space when a cell would be parsed as a formula.
+
+    Applied to machine text columns at CSV write time. The returned-file
+    validator compares cells after ``.strip()``, so a round trip through
+    the prefix stays bound to the master value.
+    """
+    if cell.startswith(_EXCEL_UNSAFE_PREFIXES):
+        return " " + cell
+    return cell
+
+
 # master column -> CSV machine column (used by the builder and the
 # returned-file integrity check). The context columns are the retrieval
-# view (anchor ± window), not the bare aligned anchor — annotators need
-# the surrounding sentences to locate counterparts that the strict DP
-# left outside the anchor group.
+# view (anchor ± window, or a neighbour fallback), not the bare aligned
+# anchor — annotators need the surrounding sentences to locate
+# counterparts that the strict DP left outside the anchor group.
 MASTER_TO_CSV_COLUMNS: dict[str, str] = {
     "datapoint_id": "id",
     "chapter": "chapter",
@@ -118,9 +139,24 @@ MASTER_TO_CSV_COLUMNS: dict[str, str] = {
     "de_head_lemma": "german_head_lemma",
     "de_sentence_text": "german_sentence",
     "en_context_text": "english_context",
+    "en_context_provenance": "english_context_provenance",
     "zh_context_text": "chinese_context",
+    "zh_context_provenance": "chinese_context_provenance",
     "source_row_sha256": "row_hash",
 }
+
+# Machine columns whose values pass through :func:`excel_safe` at write
+# time — every mapped column that carries free corpus text (ids, hashes,
+# vocabularies, and numbers never start with a formula character).
+_EXCEL_SAFE_COLUMNS = frozenset(
+    {
+        "german_pp",
+        "german_head_lemma",
+        "german_sentence",
+        "english_context",
+        "chinese_context",
+    }
+)
 
 __all__ = [
     "MACHINE_COLUMNS",
@@ -131,5 +167,7 @@ __all__ = [
     "EN_FORMS",
     "ZH_FORMS",
     "ALIGNMENT_CONFIDENCES",
+    "CONTEXT_PROVENANCES",
+    "excel_safe",
     "MASTER_TO_CSV_COLUMNS",
 ]

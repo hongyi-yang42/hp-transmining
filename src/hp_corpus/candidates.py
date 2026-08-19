@@ -17,6 +17,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# How a side's retrieval context was obtained. ``anchor_window`` is the
+# default anchor ± 1 view; ``merge_widened`` marks N:M-merged anchors whose
+# window was widened; ``neighbor_fallback`` marks anchorless sides bracketed
+# between neighbour anchors; ``manual_review`` marks sides the machine could
+# not retrieve reliably.
+CONTEXT_PROVENANCES = frozenset(
+    {"anchor_window", "merge_widened", "neighbor_fallback", "manual_review"}
+)
+
 
 @dataclass(frozen=True)
 class WindowCandidate:
@@ -66,3 +75,37 @@ def window_ids(
 ) -> list[str]:
     """Convenience: just the ordered ids of :func:`candidate_window`."""
     return [c.segment_id for c in candidate_window(anchor_ids, chapter_order, w)]
+
+
+def neighbor_bracket(
+    prev_anchor_ids: list[str],
+    next_anchor_ids: list[str],
+    chapter_order: list[str],
+    cap: int = 6,
+) -> list[str]:
+    """Bracket the target region for an anchorless sentence.
+
+    When a DE sentence has no aligned target (a DP 1:0 gap, typically
+    because the translation merged it into a neighbouring sentence), the
+    translation lives between the target anchors of the nearest DE
+    neighbours that *do* align. This returns the contiguous corpus-order
+    slice from the last id of the previous neighbour's anchor group to
+    the first id of the next neighbour's anchor group, inclusive.
+
+    One side may be empty (no aligned neighbour in that direction —
+    clamp to the chapter edge). Both empty, an anchor id missing from
+    ``chapter_order``, or a bracket longer than ``cap`` sentences all
+    yield ``[]`` — the caller marks the side for manual review rather
+    than trusting a wide fallback.
+    """
+    if not prev_anchor_ids and not next_anchor_ids:
+        return []
+    index = {sid: i for i, sid in enumerate(chapter_order)}
+    missing = [sid for sid in (*prev_anchor_ids, *next_anchor_ids) if sid not in index]
+    if missing:
+        raise ValueError(f"anchor segment ids not found in chapter order: {missing[:3]}")
+    lo = index[max(prev_anchor_ids, key=index.get)] if prev_anchor_ids else 0
+    hi = index[min(next_anchor_ids, key=index.get)] + 1 if next_anchor_ids else len(chapter_order)
+    if hi - lo > cap:
+        return []
+    return chapter_order[lo:hi]

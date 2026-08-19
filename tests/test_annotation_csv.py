@@ -35,9 +35,11 @@ def _master_row(dp: str, **overrides) -> dict[str, str]:
         "en_context_text": (
             'Prev line. He went, as he said, into the "big" house. Next line. 后续中文，逗号。'
         ),
+        "en_context_provenance": "anchor_window",
         "zh_aligned_text": "他说着，走进了那幢大房子。",
         "zh_context_ids": "hp1_zh_ch03_p0002_s004|hp1_zh_ch03_p0002_s005",
         "zh_context_text": "上一句。他说着，走进了那幢大房子。下一句。",
+        "zh_context_provenance": "anchor_window",
         "source_row_sha256": "a" * 64,
     }
     row.update(overrides)
@@ -166,3 +168,29 @@ def test_refuses_overwrite_without_force(tmp_path: Path) -> None:
     master = tmp_path / "master.tsv"
     rc2 = mod.main(["--master-tsv", str(master), "--output", str(out)])
     assert rc2 == 2
+
+
+# ------------------------------------------------------- Excel-safety
+
+
+def test_excel_safe_prefixes_formula_characters() -> None:
+    from hp_corpus.annotation_csv import excel_safe
+
+    assert excel_safe("- «Er ist weg»") == " - «Er ist weg»"
+    assert excel_safe("=SUM(A1)") == " =SUM(A1)"
+    assert excel_safe("+44") == " +44"
+    assert excel_safe("@home") == " @home"
+    assert excel_safe("im Ligusterweg") == "im Ligusterweg"
+    assert excel_safe("") == ""
+
+
+def test_builder_prefixes_formula_unsafe_german_sentence(tmp_path: Path) -> None:
+    # A dialogue line opening with a dash would render as #NAME? in Excel
+    # and be destroyed on save; the writer must ship it text-safe while
+    # the master keeps the raw text.
+    row = _master_row("dp-dash", de_sentence_text="- «Er ist weg», murmelte Ron.")
+    mod, out, rc = _build(tmp_path, [row])
+    assert rc == 0
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["german_sentence"] == " - «Er ist weg», murmelte Ron."

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from hp_corpus.candidates import WindowCandidate, candidate_window, window_ids
+from hp_corpus.candidates import (
+    WindowCandidate,
+    candidate_window,
+    neighbor_bracket,
+    window_ids,
+)
 
 
 def _order(n: int = 10, prefix: str = "hp1_zh_ch01_p0001_s") -> list[str]:
@@ -54,3 +59,45 @@ def test_window_candidate_is_frozen_dataclass() -> None:
     c = WindowCandidate(segment_id="x", in_anchor=True)
     with pytest.raises((AttributeError, TypeError)):
         c.in_anchor = False  # type: ignore[misc]
+
+
+# --------------------------------------------------------------- neighbor_bracket
+
+
+def test_bracket_between_single_anchors() -> None:
+    order = _order()
+    assert neighbor_bracket([order[2]], [order[5]], order) == order[2:6]
+
+
+def test_bracket_uses_corpus_order_edges_of_groups() -> None:
+    # An N:M anchor group: the bracket runs from the group's LAST id (in
+    # corpus order) to the next group's FIRST id, even if the group's ids
+    # are listed out of order.
+    order = _order()
+    assert neighbor_bracket([order[4], order[2]], [order[7], order[6]], order) == order[4:7]
+
+
+def test_bracket_adjacent_anchors_is_the_two_sentences() -> None:
+    order = _order()
+    assert neighbor_bracket([order[5]], [order[6]], order) == order[5:7]
+
+
+def test_bracket_clamps_when_one_side_missing() -> None:
+    order = _order()
+    assert neighbor_bracket([], [order[3]], order) == order[:4]
+    assert neighbor_bracket([order[7]], [], order) == order[7:]
+
+
+def test_bracket_both_sides_missing_is_empty() -> None:
+    assert neighbor_bracket([], [], _order()) == []
+
+
+def test_bracket_over_cap_is_empty() -> None:
+    order = _order()
+    assert neighbor_bracket([order[0]], [order[9]], order, cap=6) == []
+    assert neighbor_bracket([order[0]], [order[5]], order, cap=6) == order[0:6]
+
+
+def test_bracket_unknown_anchor_raises() -> None:
+    with pytest.raises(ValueError, match="not found in chapter order"):
+        neighbor_bracket(["bogus_id"], [], _order())

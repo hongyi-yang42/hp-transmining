@@ -13,7 +13,11 @@ The returned file is the single review source for
 
 Encoding: UTF-8 with BOM (``utf-8-sig``) so the Chinese text opens
 correctly in Excel. Quoting is minimal — fields containing commas or
-quotes are quoted per standard CSV.
+quotes are quoted per standard CSV. Free-text machine cells that start
+with ``=``/``+``/``-``/``@`` (e.g. German dialogue lines opening with a
+dash) are prefixed with one space so spreadsheets parse them as text
+instead of a formula; the return-gate validator compares after
+``.strip()``, so the prefix round-trips.
 
 Fail-closed rules: master file absent; duplicate master datapoint_ids;
 master header missing required columns; any blank machine cell;
@@ -34,7 +38,12 @@ import csv
 import sys
 from pathlib import Path
 
-from hp_corpus.annotation_csv import CSV_COLUMNS, MASTER_TO_CSV_COLUMNS
+from hp_corpus.annotation_csv import (
+    _EXCEL_SAFE_COLUMNS,
+    CSV_COLUMNS,
+    MASTER_TO_CSV_COLUMNS,
+    excel_safe,
+)
 
 EXIT_OK = 0
 EXIT_INPUT_ERROR = 2
@@ -83,6 +92,8 @@ def build_csv_rows(master_rows: list[dict[str, str]]) -> list[dict[str, str]]:
                     f"blank machine cell: master column {master_col!r} "
                     f"(CSV column {csv_col!r})"
                 )
+            if csv_col in _EXCEL_SAFE_COLUMNS:
+                value = excel_safe(value)
             row[csv_col] = value
         for col in CSV_COLUMNS:
             row.setdefault(col, "")

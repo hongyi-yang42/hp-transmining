@@ -34,6 +34,8 @@ def _write_master(path: Path, ids: list[str], values: dict | None = None) -> Pat
                 if col == "datapoint_id"
                 else "a" * 64
                 if col == "source_row_sha256"
+                else "anchor_window"
+                if col in ("en_context_provenance", "zh_context_provenance")
                 else ""
                 for col in ALL_TSV_COLUMNS
             }
@@ -51,7 +53,12 @@ def _write_csv(path: Path, rows: list[dict[str, str]], *, bom: bool = True) -> P
         w = csv.DictWriter(f, fieldnames=list(CSV_COLUMNS), lineterminator="\n")
         w.writeheader()
         for r in rows:
-            w.writerow({c: r.get(c, "") for c in CSV_COLUMNS})
+            row = {c: r.get(c, "") for c in CSV_COLUMNS}
+            if not row.get("english_context_provenance"):
+                row["english_context_provenance"] = "anchor_window"
+            if not row.get("chinese_context_provenance"):
+                row["chinese_context_provenance"] = "anchor_window"
+            w.writerow(row)
     return path
 
 
@@ -307,3 +314,31 @@ def test_stdout_privacy(tmp_path: Path, capsys) -> None:
     for leaked in ("house", "房子", "dp1"):
         assert leaked not in out
     assert "template_state: False" in out
+
+
+# --------------------------------------- Excel-safe round trip + provenance rules
+
+
+def test_excel_safe_prefix_round_trips(tmp_path: Path) -> None:
+    # The writer prefixes formula-unsafe cells with a space; a returned
+    # file that keeps that prefix must still validate against a master
+    # holding the raw text.
+    master = _write_master(
+        tmp_path / "master.tsv",
+        ["dp1"],
+        {"dp1": {"de_sentence_text": "- «Er ist weg»."}},
+    )
+    csv_path = _write_csv(
+        tmp_path / "returned.csv",
+        [_filled_row("dp1", german_sentence=" - «Er ist weg».")],
+    )
+    assert _run_validate(csv_path, master) == 0
+
+
+def test_invalid_context_provenance_fails(tmp_path: Path) -> None:
+    master = _write_master(tmp_path / "master.tsv", ["dp1"])
+    csv_path = _write_csv(
+        tmp_path / "returned.csv",
+        [_filled_row("dp1", english_context_provenance="guessed")],
+    )
+    assert _run_validate(csv_path, master) == 2

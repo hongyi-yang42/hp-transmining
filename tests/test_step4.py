@@ -1268,3 +1268,215 @@ def test_crosslingual_map_docstring_states_pp_shape_limitation() -> None:
     assert "pronominal" in doc
     assert "omitted" in doc
     assert "never auto-populate" in doc.lower() or "auto-populate" in doc.lower()
+
+
+# --------------------------------------------- retrieval policy (context provenance)
+
+
+def _build_retrieval_corpus(
+    tmp_path: Path,
+    *,
+    n: int,
+    de_en: list[tuple[list[int], list[int]]],
+    de_zh: list[tuple[list[int], list[int]]],
+    extraction_on: list[int],
+) -> dict[str, Path]:
+    """Tiny Ch.1 corpus for the retrieval-view policy: ``n`` sentences per
+    language (ids ``hp1_{lang}_ch01_p{iii}_s001``), alignment records given
+    as (de sentence numbers, tgt sentence numbers), and one contracted PP
+    extraction row per DE sentence in ``extraction_on``."""
+    extraction = tmp_path / "extracted"
+    segmented = tmp_path / "segmented"
+    aligned = tmp_path / "aligned"
+
+    def sids(lang: str) -> list[str]:
+        return [f"hp1_{lang}_ch01_p{i:04d}_s001" for i in range(1, n + 1)]
+
+    for lang in ("de", "en", "zh"):
+        _write_segments(
+            segmented / f"hp1_{lang}_ch01.jsonl",
+            [
+                {
+                    "id": sid,
+                    "chapter": 1,
+                    "paragraph": 1,
+                    "sentence": i,
+                    "text": f"synth {lang.upper()} {i}",
+                    "source_pages": [i],
+                }
+                for i, sid in enumerate(sids(lang), start=1)
+            ],
+        )
+
+    for pair, records in (("en", de_en), ("zh", de_zh)):
+        _write_alignments(
+            aligned / f"hp1_de_{pair}_ch01.jsonl",
+            [
+                _alignment_record(
+                    f"a{i:04d}",
+                    [sids("de")[d - 1] for d in de_nums],
+                    [sids(pair)[t - 1] for t in tgt_nums],
+                )
+                for i, (de_nums, tgt_nums) in enumerate(records, start=1)
+            ],
+        )
+
+    def row(i: int) -> dict[str, Any]:
+        return {
+            "parse_block_id": f"hp1_de_ch01_p{i:04d}_s001#b001",
+            "source_segment_id": f"hp1_de_ch01_p{i:04d}_s001",
+            "prep": "im",
+            "noun": "Haus",
+            "prep_token_id": "1",
+            "noun_token_id": "2",
+            "pp_token_start": "1",
+            "pp_token_end": "2",
+            "pp_surface": "im Haus",
+            "in_filter": "Y",
+        }
+
+    _write_extraction_tsv(
+        extraction / "hp1_de_ch01_contracted.tsv", "contracted", [row(i) for i in extraction_on]
+    )
+    _write_extraction_tsv(extraction / "hp1_de_ch01_uncontracted.tsv", "uncontracted", [row(1)])
+    return {
+        "extraction_dir": extraction,
+        "segmented_dir": segmented,
+        "aligned_dir": aligned,
+    }
+
+
+def _run_builder(paths: dict[str, Path], **kwargs: Any) -> list[dict[str, Any]]:
+    return build_candidates(
+        extraction_dir=paths["extraction_dir"],
+        segmented_dir=paths["segmented_dir"],
+        aligned_dir=paths["aligned_dir"],
+        chapters=[1],
+        **kwargs,
+    )
+
+
+def _by_seg(candidates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {c["de_source_segment_id"]: c for c in candidates}
+
+
+def test_merge_record_widens_window_and_flags_provenance(tmp_path: Path) -> None:
+    # DE s001+s002 merge into one EN sentence (the Ch.14 failure class):
+    # the s001 side gets a ±3 window flagged merge_widened; s003 is a plain
+    # 1:1 and keeps the ±1 anchor_window view.
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=[([1, 2], [1]), ([3], [2]), ([4], [3]), ([5], [4])],
+        de_zh=[([i], [i]) for i in range(1, 6)],
+        extraction_on=[1, 3],
+    )
+    cands = _by_seg(_run_builder(paths))
+    c1 = cands["hp1_de_ch01_p0001_s001"]
+    assert c1["en_context_provenance"] == "merge_widened"
+    assert c1["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3, 4)]
+    c3 = cands["hp1_de_ch01_p0003_s001"]
+    assert c3["en_context_provenance"] == "anchor_window"
+    assert c3["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3)]
+
+
+def test_anchorless_side_falls_back_to_neighbor_bracket(tmp_path: Path) -> None:
+    # DE s003 has no EN record (translation merged into a neighbour):
+    # the bracket between the s001 and s005 anchors covers the locus.
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=[([1], [1]), ([5], [5])],
+        de_zh=[([i], [i]) for i in range(1, 6)],
+        extraction_on=[3],
+    )
+    cands = _by_seg(_run_builder(paths))
+    c3 = cands["hp1_de_ch01_p0003_s001"]
+    assert c3["en_context_provenance"] == "neighbor_fallback"
+    assert c3["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3, 4, 5)]
+    assert c3["zh_context_provenance"] == "anchor_window"
+
+
+def test_one_to_zero_record_is_also_anchorless(tmp_path: Path) -> None:
+    # A kept 1:0 record (src present, tgt empty) hits the same fallback as
+    # having no record at all.
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=[([1], [1]), ([3], []), ([5], [5])],
+        de_zh=[([i], [i]) for i in range(1, 6)],
+        extraction_on=[3],
+    )
+    cands = _by_seg(_run_builder(paths))
+    c3 = cands["hp1_de_ch01_p0003_s001"]
+    assert c3["en_context_provenance"] == "neighbor_fallback"
+    assert c3["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3, 4, 5)]
+
+
+def test_bracket_over_cap_marks_manual_review(tmp_path: Path) -> None:
+    # The nearest anchored neighbours are 7 EN sentences apart — the
+    # bracket exceeds the cap and the side is marked for manual review
+    # rather than shipping a wide, unreliable context.
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=8,
+        de_en=[([1], [1]), ([8], [8])],
+        de_zh=[([i], [i]) for i in range(1, 9)],
+        extraction_on=[4],
+    )
+    cands = _by_seg(_run_builder(paths))
+    c4 = cands["hp1_de_ch01_p0004_s001"]
+    assert c4["en_context_provenance"] == "manual_review"
+    assert c4["en_context_ids"] == []
+
+
+def test_fallback_plan_forces_manual_review_when_locus_outside(tmp_path: Path) -> None:
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=[([1, 2], [1]), ([3], [2]), ([4], [3]), ([5], [4])],
+        de_zh=[([i], [i]) for i in range(1, 6)],
+        extraction_on=[1, 3],
+    )
+    cands = _run_builder(paths)
+    c1 = _by_seg(cands)["hp1_de_ch01_p0001_s001"]
+    outside = "hp1_en_ch01_p0005_s001"
+    inside = "hp1_en_ch01_p0002_s001"
+    planned = _run_builder(
+        paths,
+        fallback_plan={
+            c1["datapoint_id"]: {"en": [outside]},
+        },
+    )
+    p1 = _by_seg(planned)["hp1_de_ch01_p0001_s001"]
+    assert p1["en_context_provenance"] == "manual_review"
+    assert p1["en_context_ids"]  # context itself is unchanged, only the flag flips
+    planned_ok = _run_builder(
+        paths,
+        fallback_plan={
+            c1["datapoint_id"]: {"en": [inside]},
+        },
+    )
+    o1 = _by_seg(planned_ok)["hp1_de_ch01_p0001_s001"]
+    assert o1["en_context_provenance"] == "merge_widened"
+
+
+def test_pilot_tsv_emits_provenance_columns_nonblank(tmp_path: Path) -> None:
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=[([1, 2], [1]), ([3], [2]), ([4], [3]), ([5], [4])],
+        de_zh=[([i], [i]) for i in range(1, 6)],
+        extraction_on=[1],
+    )
+    cands = _run_builder(paths)
+    out = tmp_path / "master.tsv"
+    write_pilot_tsv(cands, out)
+    with open(out, encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    assert rows
+    for r in rows:
+        assert r["en_context_provenance"] in {"anchor_window", "merge_widened",
+                                              "neighbor_fallback", "manual_review"}
+        assert r["zh_context_provenance"] in {"anchor_window", "merge_widened",
+                                              "neighbor_fallback", "manual_review"}

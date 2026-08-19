@@ -15,7 +15,9 @@ Structure + binding (run on every file, filled or not):
   * every machine column is re-derived from the master row
     (MASTER_TO_CSV_COLUMNS) and compared cell by cell — a returned file
     whose ``english_context`` / ``chinese_context`` / … was edited (even
-    with an untouched ``row_hash``) fails closed.
+    with an untouched ``row_hash``) fails closed;
+  * ``english_context_provenance`` / ``chinese_context_provenance`` are
+    in the CONTEXT_PROVENANCES vocabulary.
 
 Annotation content (skipped while the file is in template state —
 every annotator cell blank):
@@ -46,6 +48,7 @@ from pathlib import Path
 from hp_corpus.annotation_csv import (
     ALIGNMENT_CONFIDENCES,
     ANNOTATOR_COLUMNS,
+    CONTEXT_PROVENANCES,
     CSV_COLUMNS,
     DE_VALID_VALUES,
     EN_FORMS,
@@ -115,6 +118,7 @@ def _binding_errors(
 
     hash_mismatch = False
     edited_columns: set[str] = set()
+    bad_provenance = False
     for r in csv_rows:
         dp = (r.get("id", "") or "").strip()
         master = master_rows.get(dp)
@@ -125,16 +129,23 @@ def _binding_errors(
         ).strip():
             hash_mismatch = True
         # Re-derive every machine column from the master row; the
-        # returned file must carry the master's values verbatim.
+        # returned file must carry the master's values verbatim. Both
+        # sides are stripped, so the writer's Excel-safe leading space
+        # on formula-unsafe cells round-trips.
         for master_col, csv_col in MASTER_TO_CSV_COLUMNS.items():
             expected = (master.get(master_col, "") or "").strip()
             actual = (r.get(csv_col, "") or "").strip()
             if actual != expected:
                 edited_columns.add(csv_col)
+        for csv_col in ("english_context_provenance", "chinese_context_provenance"):
+            if (r.get(csv_col, "") or "").strip() not in CONTEXT_PROVENANCES:
+                bad_provenance = True
     if hash_mismatch:
         errors.append("ROW_HASH_MISMATCH")
     if edited_columns:
         errors.append("MACHINE_COLUMN_EDITED (" + ", ".join(sorted(edited_columns)) + ")")
+    if bad_provenance:
+        errors.append("CONTEXT_PROVENANCE_INVALID")
     return errors
 
 

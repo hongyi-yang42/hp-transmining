@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .candidates import window_ids
+from .candidates import neighbor_bracket, window_ids
 
 # --------------------------------------------------------------------- constants
 
@@ -197,12 +197,25 @@ SOURCE_COLUMNS: tuple[str, ...] = (
 # break the annotation-CSV binding to already-distributed master rows. The
 # ``*_sentence_ids`` / ``*_aligned_text`` columns above keep their anchor
 # (partition) semantics; these columns are the expanded lookup view.
+# ``*_context_provenance`` records how the view was retrieved (see
+# ``hp_corpus.candidates.CONTEXT_PROVENANCES``) so annotators know which
+# sides to treat with care.
 CONTEXT_COLUMNS: tuple[str, ...] = (
     "en_context_ids",
     "en_context_text",
+    "en_context_provenance",
     "zh_context_ids",
     "zh_context_text",
+    "zh_context_provenance",
 )
+
+# Window width for anchor sides whose alignment record merged several DE
+# sentences (N:M): merges are the known failure class for the ±1 window
+# (the anchor can sit on the wrong target sentence), so those sides get a
+# wider view. Anchorless sides fall back to a neighbour bracket capped at
+# FALLBACK_BRACKET_CAP target sentences.
+MERGE_CONTEXT_WINDOW = 3
+FALLBACK_BRACKET_CAP = 6
 
 EDITABLE_COLUMNS: tuple[str, ...] = (
     # German-candidate confirmation. Annotator decides whether each row is
@@ -651,6 +664,66 @@ def _has_tsv_body(path: Path) -> bool:
     return False
 
 
+def _nearest_anchor_side_ids(
+    de_order_ch: list[str],
+    start: int,
+    step: int,
+    alignments: dict[str, _AlignmentRecord],
+    tgt_lang: str,
+) -> list[str]:
+    """Scan outward from ``start`` (exclusive bounds apply via the loop
+    condition) for the nearest DE sentence whose alignment record has a
+    non-empty target side; return that side's target sentence ids."""
+    i = start
+    while 0 <= i < len(de_order_ch):
+        rec = alignments.get(de_order_ch[i])
+        side = rec.side_for_lang(tgt_lang) if rec else None
+        if side is not None and side.sentence_ids:
+            return list(side.sentence_ids)
+        i += step
+    return []
+
+
+def _side_context(
+    de_sent_id: str,
+    de_index: dict[str, int],
+    de_order_ch: list[str],
+    alignments: dict[str, _AlignmentRecord],
+    tgt_lang: str,
+    tgt_order_ch: list[str],
+    *,
+    base_window: int,
+    merge_window: int,
+    bracket_cap: int,
+) -> tuple[list[str], str]:
+    """Retrieval view for one target side of one DE sentence.
+
+    Returns ``(context_ids, provenance)``. Anchored sides expand the anchor
+    group by ``base_window`` — or ``merge_window`` when the record merged
+    several DE sentences (N:M), the known wrong-window failure class.
+    Anchorless sides (DP 1:0 gaps, typically a translation merged into a
+    neighbouring sentence) are bracketed between the target anchors of the
+    nearest DE neighbours that do align; an unusable bracket yields an empty
+    context with ``manual_review``.
+    """
+    rec = alignments.get(de_sent_id)
+    side = rec.side_for_lang(tgt_lang) if rec else None
+    if side is not None and side.sentence_ids:
+        de_side = rec.side_for_lang("de") if rec else None
+        merge = de_side is not None and len(de_side.sentence_ids) >= 2
+        ids = window_ids(
+            side.sentence_ids, tgt_order_ch, merge_window if merge else base_window
+        )
+        return ids, ("merge_widened" if merge else "anchor_window")
+    pos = de_index.get(de_sent_id, -1)
+    if pos < 0:
+        return [], "manual_review"
+    prev_ids = _nearest_anchor_side_ids(de_order_ch, pos - 1, -1, alignments, tgt_lang)
+    next_ids = _nearest_anchor_side_ids(de_order_ch, pos + 1, 1, alignments, tgt_lang)
+    bracket = neighbor_bracket(prev_ids, next_ids, tgt_order_ch, cap=bracket_cap)
+    return bracket, ("neighbor_fallback" if bracket else "manual_review")
+
+
 def _assert_inputs_present(
     chapters: list[int],
     *,
@@ -720,6 +793,9 @@ def build_candidates(
     chapters: Iterable[int],
     zero_hits_ok: frozenset[tuple[int, str]] = frozenset(),
     context_window: int = 1,
+    merge_context_window: int = MERGE_CONTEXT_WINDOW,
+    fallback_bracket_cap: int = FALLBACK_BRACKET_CAP,
+    fallback_plan: dict[str, dict[str, list[str]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the full candidate list for all chapters.
 
@@ -730,6 +806,12 @@ def build_candidates(
     legitimately header-only because the full-novel extraction manifest
     recorded ``status="zero_hits_ok"`` for them; all other header-only
     TSVs are rejected as upstream failures.
+
+    ``fallback_plan`` optionally maps datapoint_id → ``{"en"|"zh"}`` →
+    human-reviewed expected-locus segment ids. When a side's expected
+    locus is NOT inside the computed context, that side's
+    ``*_context_provenance`` is forced to ``manual_review`` — reviewed
+    loci gate the machine view instead of silently shipping a miss.
 
     Raises :class:`MissingInputsError` if any requested chapter is missing
     a required input file, and :class:`UnresolvedSegmentIdError` if an
@@ -753,12 +835,15 @@ def build_candidates(
     zh_segments = _load_segments(segmented_dir, "zh", chapters)
     en_order = _load_chapter_order(segmented_dir, "en", chapters)
     zh_order = _load_chapter_order(segmented_dir, "zh", chapters)
+    de_order = _load_chapter_order(segmented_dir, "de", chapters)
 
     de_en_alignments = _load_alignments(aligned_dir, "de", "en", chapters)
     de_zh_alignments = _load_alignments(aligned_dir, "de", "zh", chapters)
 
     candidates: list[dict[str, Any]] = []
     for ch in chapters:
+        de_order_ch = de_order.get(ch, [])
+        de_index_ch = {sid: i for i, sid in enumerate(de_order_ch)}
         for kind, de_form in (("contracted", "contracted"), ("uncontracted", "uncontracted")):
             tsv_path = extraction_dir / f"hp1_de_ch{ch:02d}_{kind}.tsv"
             if not tsv_path.exists():
@@ -794,23 +879,42 @@ def build_candidates(
                 en_side = en_rec.side_for_lang("en") if en_rec else None
                 zh_side = zh_rec.side_for_lang("zh") if zh_rec else None
 
-                en_ctx_ids = window_ids(
-                    en_side.sentence_ids if en_side else [],
+                datapoint_id = _make_datapoint_id(ch, block_id, token_start, token_end)
+                en_ctx_ids, en_provenance = _side_context(
+                    sent_id,
+                    de_index_ch,
+                    de_order_ch,
+                    de_en_alignments,
+                    "en",
                     en_order.get(ch, []),
-                    context_window,
+                    base_window=context_window,
+                    merge_window=merge_context_window,
+                    bracket_cap=fallback_bracket_cap,
                 )
-                zh_ctx_ids = window_ids(
-                    zh_side.sentence_ids if zh_side else [],
+                zh_ctx_ids, zh_provenance = _side_context(
+                    sent_id,
+                    de_index_ch,
+                    de_order_ch,
+                    de_zh_alignments,
+                    "zh",
                     zh_order.get(ch, []),
-                    context_window,
+                    base_window=context_window,
+                    merge_window=merge_context_window,
+                    bracket_cap=fallback_bracket_cap,
                 )
+                plan_entry = (fallback_plan or {}).get(datapoint_id)
+                if plan_entry:
+                    if plan_entry.get("en") and not set(plan_entry["en"]) <= set(en_ctx_ids):
+                        en_provenance = "manual_review"
+                    if plan_entry.get("zh") and not set(plan_entry["zh"]) <= set(zh_ctx_ids):
+                        zh_provenance = "manual_review"
 
                 # Cardinality is from DE's perspective: n_de : n_tgt.
                 de_side_en = en_rec.side_for_lang("de") if en_rec else None
                 de_side_zh = zh_rec.side_for_lang("de") if zh_rec else None
 
                 candidate = {
-                    "datapoint_id": _make_datapoint_id(ch, block_id, token_start, token_end),
+                    "datapoint_id": datapoint_id,
                     "dataset_scope": DATASET_SCOPE,
                     "paper_final_sample": PAPER_FINAL_SAMPLE,
                     "chapter": ch,
@@ -849,10 +953,12 @@ def build_candidates(
                     "en_context_text": " ".join(
                         en_segments[sid].text for sid in en_ctx_ids if sid in en_segments
                     ),
+                    "en_context_provenance": en_provenance,
                     "zh_context_ids": list(zh_ctx_ids),
                     "zh_context_text": " ".join(
                         zh_segments[sid].text for sid in zh_ctx_ids if sid in zh_segments
                     ),
+                    "zh_context_provenance": zh_provenance,
                     # Pilot (filled later by select_pilot)
                     "pilot_selected": False,
                     "pilot_selection_reason": "",
