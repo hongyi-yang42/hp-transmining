@@ -217,7 +217,7 @@ def cmd_align(args: argparse.Namespace) -> int:
         locality_band=args.band,
         force_recompute=args.force_recompute,
     )
-    alignments = align_segments(src, tgt, config)
+    alignments = align_segments(src, tgt, config).records
     # Output name derived from input languages: hp1_<src>_<tgt>_ch01.jsonl
     src_lang = _lang_from_path(args.src)
     tgt_lang = _lang_from_path(args.tgt)

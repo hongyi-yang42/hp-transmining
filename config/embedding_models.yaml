@@ -1,0 +1,18 @@
+# Embedding-model manifest for the alignment pipeline (tracked; the models/
+# directory itself is gitignored — never commit weights).
+#
+# "fingerprint" is what hp_corpus.align.model_fingerprint() computes over the
+# model directory (sha256 over every non-inert file: configs, tokenizer,
+# loadable weights; alternate formats like flax/onnx are excluded). The
+# alignment cache identity covers it, so swapped weights under an unchanged
+# path can never reuse old vectors; embed_with_identity() fails closed when
+# a pinned model's local fingerprint contradicts the value here.
+#
+# Recompute after a model upgrade and paste the new value:
+#   uv run python -c "from hp_corpus.align import model_fingerprint; \
+#       print(model_fingerprint('models/LaBSE', 'data/embeddings'))"
+models:
+  - model_name: models/LaBSE
+    source: modelscope:sentence-transformers/LaBSE
+    fingerprint_algorithm: sha256-over-loaded-files-v1
+    fingerprint: "90dc92f1474c354bdc3901aa959f9ca6f4d2b723c289144150a4902cc90e56df"

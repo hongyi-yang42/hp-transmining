@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from hp_corpus.align import (
+    CACHE_SCHEMA_VERSION,
     AlignmentConfig,
     align_segments,
     load_segments,
@@ -99,8 +100,8 @@ def _type_counts(alignments: list[Alignment]) -> dict[str, int]:
 
 def _find_cache_digest(lang: str, scope: str) -> str | None:
     """Locate the content-addressed cache file (digest16 prefix) written for
-    a given lang/scope under the v2/ namespace."""
-    scope_dir = EMBED_DIR / "v2" / lang / scope
+    a given lang/scope under the current cache namespace."""
+    scope_dir = EMBED_DIR / CACHE_SCHEMA_VERSION / lang / scope
     if not scope_dir.exists():
         return None
     metas = sorted(scope_dir.glob("*.meta.json"))
@@ -161,7 +162,7 @@ def run_one(src_lang: str, tgt_lang: str, chapter: int, force: bool) -> dict[str
         model_name=MODEL_NAME,
         force_recompute=force,
     )  # gap/multi penalties + arity come from AlignmentConfig defaults
-    alignments = align_segments(src, tgt, cfg)
+    alignments = align_segments(src, tgt, cfg).records
 
     # Write alignment JSONL to BOTH the canonical data/aligned/ path (used by
     # Step 4 builder) and reflect the same file in the v2 manifest dir.

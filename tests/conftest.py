@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
@@ -12,6 +14,30 @@ import yaml
 def tmp_repo(tmp_path: Path) -> Path:
     """Provide a clean working directory under tmp_path."""
     return tmp_path
+
+
+@pytest.fixture
+def fake_encoder(monkeypatch: pytest.MonkeyPatch):
+    """Install a fake ``sentence_transformers.SentenceTransformer`` so tests
+    exercise the cache logic without loading a real embedding model.
+
+    The fake produces a deterministic 4-dim vector per input string
+    (hash-based), so identical inputs yield identical vectors across calls."""
+
+    class FakeModel:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def encode(self, inputs, **kwargs):  # type: ignore[no-untyped-def]
+            return np.array(
+                [[float((hash(s + f"|{i}") % 1000) / 1000.0) for i in range(4)] for s in inputs],
+                dtype=np.float32,
+            )
+
+    fake_module = type(sys)("sentence_transformers")
+    fake_module.SentenceTransformer = FakeModel  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    return FakeModel
 
 
 @pytest.fixture

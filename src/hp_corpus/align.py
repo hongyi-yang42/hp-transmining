@@ -7,9 +7,10 @@ DP inline so the project has no hard dependency on the upstream code.
 
 ``align_segments`` is **language-pair-agnostic**: pass any two languages as
 ``src`` and ``tgt``. Embedding caches are **content-addressed** — the cache
-identity is a SHA-256 over (schema version, model name, derived language,
-derived chapter scope, ordered segment IDs, ordered sentence texts), so any
-change to the input corpus produces a fresh cache. Mixed-language,
+identity is a SHA-256 over (schema version, model name, **model
+fingerprint**, derived language, derived chapter scope, ordered segment IDs,
+ordered sentence texts), so any change to the input corpus *or to the local
+model weights* produces a fresh cache. Mixed-language,
 mixed-chapter, malformed-ID, duplicate-ID, or empty inputs raise
 ``CacheValidationError`` rather than silently falling back to a shared key.
 
@@ -42,9 +43,13 @@ _SEGMENT_ID_LANG_RE = re.compile(r"^[a-z0-9]+_([a-z]{2,3})_ch\d{2}_p\d{4}_s\d{3}
 # different chapters of the same language do not share vectors.
 _SEGMENT_ID_SCOPE_RE = re.compile(r"^([a-z0-9]+_[a-z]{2,3}_ch\d{2})_p\d{4}_s\d{3}$")
 
-# Bump when the cache file format or identity algorithm changes. Existing v2
+# Bump when the cache file format or identity algorithm changes. Existing
 # caches become invisible to a bumped version (a new subdir is used).
-CACHE_SCHEMA_VERSION = "v2"
+# v2 → v3: the digest now also covers the model fingerprint, so swapping
+# weights under an unchanged model path invalidates old vectors (migrate
+# existing LaBSE caches with scripts/migrate_embeddings_v2_to_v3.py instead
+# of re-encoding).
+CACHE_SCHEMA_VERSION = "v3"
 
 # Records scoring below this stay machine records (method="embedding_dp")
 # and are flagged needs_review=True for human triage — never relabeled manual.
@@ -83,13 +88,15 @@ class CacheValidationError(ValueError):
 class CacheIdentity:
     """Content-addressed cache identity for one embedding file.
 
-    The ``digest`` is a SHA-256 over (schema_version, model_name, lang, scope,
-    ordered segment_ids, ordered sentence_texts). Any change to inputs forces
-    a new cache file; stale caches are invisible to the lookup path.
+    The ``digest`` is a SHA-256 over (schema_version, model_fingerprint,
+    model_name, lang, scope, ordered segment_ids, ordered sentence_texts).
+    Any change to inputs — including the local weights behind ``model_name``
+    — forces a new cache file; stale caches are invisible to the lookup path.
     """
 
     schema_version: str
     model_name: str
+    model_fingerprint: str
     lang: str
     scope: str
     segment_ids: tuple[str, ...]
@@ -212,10 +219,144 @@ def _scope_of_segments(segments: list[Segment]) -> str:
     return ""
 
 
+# --- model fingerprints -----------------------------------------------------
+# A cache identity that hashes only the model *name* string cannot tell when
+# the weights under that path change (models/ is gitignored, so nothing else
+# would catch a swap). The fingerprint hashes every file the loader can
+# actually read; the entries below are alternate weight formats / export
+# artifacts that sentence-transformers never loads, excluded so the hash
+# stays proportional to what influences embeddings.
+_INERT_MODEL_ENTRIES = frozenset(
+    {
+        "onnx",
+        "openvino",
+        "flax_model.msgpack",
+        "tf_model.h5",
+        "rust_model.ot",
+        ".git",
+        "__pycache__",
+    }
+)
+FINGERPRINT_ALGORITHM = "sha256-over-loaded-files-v1"
+
+# Tracked manifest pinning expected fingerprints for canonical models:
+# config/embedding_models.yaml. Absent file → no enforcement.
+_EMBEDDING_MODELS_MANIFEST = (
+    Path(__file__).resolve().parents[2] / "config" / "embedding_models.yaml"
+)
+
+
+def _hash_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _is_inert_model_path(root: Path, path: Path) -> bool:
+    return any(part in _INERT_MODEL_ENTRIES for part in path.relative_to(root).parts)
+
+
+def _fingerprint_memo_path(model_name: str, cache_dir: Path) -> Path:
+    slug = re.sub(r"[^A-Za-z0-9.-]+", "_", model_name).strip("_") or "model"
+    return cache_dir / "model_fingerprints" / f"{slug}.json"
+
+
+def model_fingerprint(model_name: str, cache_dir: str | Path) -> str:
+    """Stable identity of the embedding model actually on disk.
+
+    Local model directory: sha256 over (relative path, size, sha256) of
+    every non-inert file — swapping weights under the same path changes the
+    fingerprint and therefore the cache identity. A model name without a
+    local directory (e.g. a HF hub id) degrades to ``"id:<model_name>"``:
+    nothing local to pin. The expensive hash is memoized under
+    ``{cache_dir}/model_fingerprints/`` keyed by each file's
+    (size, mtime_ns), so unchanged weights are never re-hashed.
+    """
+    root = Path(model_name)
+    if not root.is_dir():
+        return f"id:{model_name}"
+    files = sorted(
+        p for p in root.rglob("*") if p.is_file() and not _is_inert_model_path(root, p)
+    )
+    entries: list[tuple[str, int, int]] = []
+    for p in files:
+        st = p.stat()
+        entries.append((str(p.relative_to(root)), st.st_size, st.st_mtime_ns))
+
+    memo_path = _fingerprint_memo_path(model_name, Path(cache_dir))
+    memo: dict[str, Any] | None = None
+    if memo_path.exists():
+        try:
+            memo = json.loads(memo_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            memo = None
+    if (
+        isinstance(memo, dict)
+        and memo.get("algorithm") == FINGERPRINT_ALGORITHM
+        and memo.get("root") == str(root)
+        and [(f[0], f[1], f[2]) for f in memo.get("files", [])] == entries
+    ):
+        return str(memo["fingerprint"])
+
+    records: list[list[Any]] = []
+    h = hashlib.sha256()
+    h.update(FINGERPRINT_ALGORITHM.encode("utf-8"))
+    for (rel, size, mtime), p in zip(entries, files, strict=True):
+        file_hash = _hash_file(p)
+        h.update(f"{rel}\x1f{size}\x1f{file_hash}".encode())
+        h.update(b"\x1e")
+        records.append([rel, size, mtime, file_hash])
+    fingerprint = h.hexdigest()
+    memo_path.parent.mkdir(parents=True, exist_ok=True)
+    memo_path.write_text(
+        json.dumps(
+            {
+                "algorithm": FINGERPRINT_ALGORITHM,
+                "model_name": model_name,
+                "root": str(root),
+                "files": records,
+                "fingerprint": fingerprint,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return fingerprint
+
+
+def verify_model_fingerprint(model_name: str, fingerprint: str) -> None:
+    """Fail closed when config/embedding_models.yaml pins this model to a
+    different fingerprint (weights swapped / wrong checkout). A model with
+    no manifest entry carries no expectation and passes."""
+    if not _EMBEDDING_MODELS_MANIFEST.exists():
+        return
+    import yaml
+
+    try:
+        manifest = yaml.safe_load(_EMBEDDING_MODELS_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise CacheValidationError(f"embedding model manifest unreadable: {exc}") from exc
+    for entry in (manifest or {}).get("models") or []:
+        if not isinstance(entry, dict) or entry.get("model_name") != model_name:
+            continue
+        expected = entry.get("fingerprint")
+        if expected and expected != fingerprint:
+            raise CacheValidationError(
+                f"model fingerprint mismatch for {model_name!r}: manifest pins "
+                f"{str(expected)[:16]}… but the local directory hashes to "
+                f"{fingerprint[:16]}… — refusing to use or cache these vectors"
+            )
+        return
+
+
 def _build_cache_identity(
     segment_ids: list[str],
     sentences: list[str],
     model_name: str,
+    model_fingerprint: str = "",
     schema_version: str = CACHE_SCHEMA_VERSION,
 ) -> CacheIdentity:
     """Validate inputs and build an immutable cache identity.
@@ -272,6 +413,8 @@ def _build_cache_identity(
     h = hashlib.sha256()
     h.update(schema_version.encode("utf-8"))
     h.update(b"\x1f")
+    h.update(model_fingerprint.encode("utf-8"))
+    h.update(b"\x1f")
     h.update(model_name.encode("utf-8"))
     h.update(b"\x1f")
     h.update(lang.encode("utf-8"))
@@ -288,6 +431,7 @@ def _build_cache_identity(
     return CacheIdentity(
         schema_version=schema_version,
         model_name=model_name,
+        model_fingerprint=model_fingerprint,
         lang=lang,
         scope=scope,
         segment_ids=tuple(segment_ids),
@@ -316,6 +460,7 @@ def _meta_matches(meta: dict[str, Any], identity: CacheIdentity, n_rows: int, di
     return (
         meta.get("schema_version") == identity.schema_version
         and meta.get("model_name") == identity.model_name
+        and meta.get("model_fingerprint") == identity.model_fingerprint
         and meta.get("lang") == identity.lang
         and meta.get("scope") == identity.scope
         and meta.get("digest") == identity.digest
@@ -334,7 +479,32 @@ def embed_sentences(
     force_recompute: bool = False,
     schema_version: str = CACHE_SCHEMA_VERSION,
 ) -> np.ndarray:
-    """Embed ``sentences`` with a sentence-transformers model, content-addressed.
+    """Embed with a sentence-transformers model, content-addressed (see
+    :func:`embed_with_identity` for the cache contract)."""
+    vecs, _ = embed_with_identity(
+        sentences,
+        segment_ids,
+        cache_dir,
+        model_name,
+        force_recompute=force_recompute,
+        schema_version=schema_version,
+    )
+    return vecs
+
+
+def embed_with_identity(
+    sentences: list[str],
+    segment_ids: list[str],
+    cache_dir: str | Path,
+    model_name: str = "models/LaBSE",
+    *,
+    force_recompute: bool = False,
+    schema_version: str = CACHE_SCHEMA_VERSION,
+) -> tuple[np.ndarray, CacheIdentity]:
+    """Embed ``sentences`` with a sentence-transformers model, content-addressed,
+    returning the vectors together with the cache identity actually used —
+    callers that record provenance (run manifests) must persist this identity
+    rather than re-discovering cache files by glob order.
 
     Cache layout::
 
@@ -342,18 +512,26 @@ def embed_sentences(
         {cache_dir}/{schema_version}/{lang}/{scope}/{digest16}.meta.json
 
     The cache identity (and therefore ``digest``) covers ``schema_version``,
-    ``model_name``, the derived ``lang`` and ``scope``, the ordered
-    ``segment_ids``, and the ordered ``sentences``. A cache hit requires the
-    ``.meta.json`` to round-trip the same identity and a row count + dim that
-    matches the loaded ``.npy``; otherwise the cache is treated as stale and
-    a fresh encode is written.
+    the model fingerprint of the weights behind ``model_name`` (verified
+    against config/embedding_models.yaml when the model is pinned there),
+    the derived ``lang`` and ``scope``, the ordered ``segment_ids``, and the
+    ordered ``sentences``. A cache hit requires the ``.meta.json`` to
+    round-trip the same identity and a row count + dim that matches the
+    loaded ``.npy``; otherwise the cache is treated as stale and a fresh
+    encode is written.
 
     Raises:
         CacheValidationError: if ``segment_ids`` and ``sentences`` fail
             uniformity / well-formedness checks (mixed language, mixed
-            chapter, malformed IDs, duplicates, empty, or length mismatch).
+            chapter, malformed IDs, duplicates, empty, length mismatch),
+            or the local model's fingerprint contradicts the pinned
+            manifest.
     """
-    identity = _build_cache_identity(segment_ids, sentences, model_name, schema_version)
+    fingerprint = model_fingerprint(model_name, cache_dir)
+    verify_model_fingerprint(model_name, fingerprint)
+    identity = _build_cache_identity(
+        segment_ids, sentences, model_name, fingerprint, schema_version
+    )
     npy_path, meta_path = _cache_paths(identity, Path(cache_dir))
     npy_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -364,7 +542,7 @@ def embed_sentences(
             if meta is not None and _meta_matches(
                 meta, identity, vecs.shape[0], int(vecs.shape[1])
             ):
-                return vecs
+                return vecs, identity
         except (OSError, ValueError):
             pass  # corrupt cache file → fall through to recompute
 
@@ -395,6 +573,7 @@ def embed_sentences(
             {
                 "schema_version": identity.schema_version,
                 "model_name": identity.model_name,
+                "model_fingerprint": identity.model_fingerprint,
                 "lang": identity.lang,
                 "scope": identity.scope,
                 "n_rows": int(vecs.shape[0]),
@@ -408,7 +587,7 @@ def embed_sentences(
         ),
         encoding="utf-8",
     )
-    return vecs
+    return vecs, identity
 
 
 def _ratio_transform(sims: np.ndarray, k: int) -> np.ndarray:
@@ -713,11 +892,22 @@ def _lexical_prior_kwargs(
     }
 
 
+@dataclass(frozen=True)
+class AlignmentRun:
+    """One align_segments call: the records plus the cache identity each
+    side's vectors actually came from. Manifests must persist these
+    identities — never re-discover cache files by directory listing."""
+
+    records: list[Alignment]
+    src_identity: CacheIdentity
+    tgt_identity: CacheIdentity
+
+
 def align_segments(
     src: list[Segment],
     tgt: list[Segment],
     config: AlignmentConfig,
-) -> list[Alignment]:
+) -> AlignmentRun:
     """Align two lists of segments. Language-pair-agnostic: cache identities
     are derived from the segment IDs (book_lang_chNN scope) AND the segment
     texts, so any change to either side produces a fresh content-addressed
@@ -727,14 +917,14 @@ def align_segments(
     tgt_ids = [s.id for s in tgt]
     src_texts = [s.text for s in src]
     tgt_texts = [s.text for s in tgt]
-    src_vecs = embed_sentences(
+    src_vecs, src_identity = embed_with_identity(
         src_texts,
         src_ids,
         config.embed_cache_dir,
         config.model_name,
         force_recompute=config.force_recompute,
     )
-    tgt_vecs = embed_sentences(
+    tgt_vecs, tgt_identity = embed_with_identity(
         tgt_texts,
         tgt_ids,
         config.embed_cache_dir,
@@ -787,7 +977,11 @@ def align_segments(
                 validated=False,
             )
         )
-    return records
+    return AlignmentRun(
+        records=records,
+        src_identity=src_identity,
+        tgt_identity=tgt_identity,
+    )
 
 
 def write_alignments_jsonl(alignments: list[Alignment], output_path: str | Path) -> Path:
