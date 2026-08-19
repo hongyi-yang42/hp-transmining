@@ -51,6 +51,11 @@ Context-provenance vocabulary:
   one record; the window is widened to three neighbours per side because
   such merges are the known source of off-by-one anchors. Check the
   context really contains your sentence's translation.
+- `heuristic_widened` — same widened window, triggered by a suspicion
+  signal instead: the German segment packs several sentences or dialogue
+  turns (the source's text layer sometimes drops the periods), or the
+  anchor's alignment confidence is low. Same advice: verify the context
+  contains your sentence's translation before marking a counterpart.
 - `neighbor_fallback` — the German sentence has no aligned anchor on
   this side (usually because the translation merged it into a
   neighbouring sentence). The context is the bracket between the nearest

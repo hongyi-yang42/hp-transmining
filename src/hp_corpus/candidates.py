@@ -19,11 +19,19 @@ from dataclasses import dataclass
 
 # How a side's retrieval context was obtained. ``anchor_window`` is the
 # default anchor ± 1 view; ``merge_widened`` marks N:M-merged anchors whose
-# window was widened; ``neighbor_fallback`` marks anchorless sides bracketed
-# between neighbour anchors; ``manual_review`` marks sides the machine could
-# not retrieve reliably.
+# window was widened; ``heuristic_widened`` marks sides widened on a
+# suspicion signal (under-segmented German segment or low-confidence
+# anchor); ``neighbor_fallback`` marks anchorless sides bracketed between
+# neighbour anchors; ``manual_review`` marks sides the machine could not
+# retrieve reliably.
 CONTEXT_PROVENANCES = frozenset(
-    {"anchor_window", "merge_widened", "neighbor_fallback", "manual_review"}
+    {
+        "anchor_window",
+        "merge_widened",
+        "heuristic_widened",
+        "neighbor_fallback",
+        "manual_review",
+    }
 )
 
 

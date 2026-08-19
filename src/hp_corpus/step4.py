@@ -209,12 +209,25 @@ CONTEXT_COLUMNS: tuple[str, ...] = (
     "zh_context_provenance",
 )
 
-# Window width for anchor sides whose alignment record merged several DE
-# sentences (N:M): merges are the known failure class for the ±1 window
-# (the anchor can sit on the wrong target sentence), so those sides get a
-# wider view. Anchorless sides fall back to a neighbour bracket capped at
+# Window width for anchor sides widened by any signal; base width is
+# ``context_window`` (±1). Widening signals (any one widens to ±3):
+#
+# * ``merge`` — the alignment record merged several DE sentences (N:M);
+#   the anchor can sit on the wrong target sentence.
+# * under-segmented German segment — the DE text packs several sentences
+#   or dialogue turns (≥2 terminal-punctuation groups, ≥2 » turn
+#   markers, or abnormally long). The 1998 born-digital text layer
+#   sometimes drops the periods at turn boundaries, so one DE segment
+#   maps to several EN/ZH sentences and the DP anchors the first of
+#   them, stranding PPs that live in the later parts.
+# * low anchor confidence (< LOWCONF_WIDEN_BELOW) — the DP itself flags
+#   local-reordering anchors as uncertain.
+#
+# Anchorless sides fall back to a neighbour bracket capped at
 # FALLBACK_BRACKET_CAP target sentences.
-MERGE_CONTEXT_WINDOW = 3
+WIDENED_CONTEXT_WINDOW = 3
+LONG_SEGMENT_THRESHOLD = 280  # chars; p95 of DE PP sentences ≈ 260
+LOWCONF_WIDEN_BELOW = 0.5
 FALLBACK_BRACKET_CAP = 6
 
 EDITABLE_COLUMNS: tuple[str, ...] = (
@@ -684,8 +697,24 @@ def _nearest_anchor_side_ids(
     return []
 
 
+_TERMINAL_PUNCT = re.compile(r"[.!?…]+")
+
+
+def _suspect_undersegmented(de_text: str) -> bool:
+    """True when a German segment likely packs several sentences or
+    dialogue turns. The 1998 text layer drops periods at some turn
+    boundaries and loses « pairings, so both the punctuation count and
+    the »-turn count can under-detect; length catches the residue."""
+    if len(_TERMINAL_PUNCT.findall(de_text)) >= 2:
+        return True
+    if de_text.count("»") >= 2:
+        return True
+    return len(de_text) > LONG_SEGMENT_THRESHOLD
+
+
 def _side_context(
     de_sent_id: str,
+    de_text: str,
     de_index: dict[str, int],
     de_order_ch: list[str],
     alignments: dict[str, _AlignmentRecord],
@@ -693,14 +722,17 @@ def _side_context(
     tgt_order_ch: list[str],
     *,
     base_window: int,
-    merge_window: int,
+    widened_window: int,
     bracket_cap: int,
+    lowconf_below: float,
 ) -> tuple[list[str], str]:
     """Retrieval view for one target side of one DE sentence.
 
     Returns ``(context_ids, provenance)``. Anchored sides expand the anchor
-    group by ``base_window`` — or ``merge_window`` when the record merged
-    several DE sentences (N:M), the known wrong-window failure class.
+    group by ``base_window`` — or ``widened_window`` when a widening signal
+    fires (N:M merge, suspected under-segmented German segment, or
+    low-confidence anchor); see the constants block above for why each
+    signal marks a known wrong-window failure class.
     Anchorless sides (DP 1:0 gaps, typically a translation merged into a
     neighbouring sentence) are bracketed between the target anchors of the
     nearest DE neighbours that do align; an unusable bracket yields an empty
@@ -711,10 +743,19 @@ def _side_context(
     if side is not None and side.sentence_ids:
         de_side = rec.side_for_lang("de") if rec else None
         merge = de_side is not None and len(de_side.sentence_ids) >= 2
+        suspect = _suspect_undersegmented(de_text)
+        lowconf = rec is not None and rec.confidence < lowconf_below
+        widen = merge or suspect or lowconf
         ids = window_ids(
-            side.sentence_ids, tgt_order_ch, merge_window if merge else base_window
+            side.sentence_ids, tgt_order_ch, widened_window if widen else base_window
         )
-        return ids, ("merge_widened" if merge else "anchor_window")
+        if merge:
+            provenance = "merge_widened"
+        elif suspect or lowconf:
+            provenance = "heuristic_widened"
+        else:
+            provenance = "anchor_window"
+        return ids, provenance
     pos = de_index.get(de_sent_id, -1)
     if pos < 0:
         return [], "manual_review"
@@ -793,8 +834,9 @@ def build_candidates(
     chapters: Iterable[int],
     zero_hits_ok: frozenset[tuple[int, str]] = frozenset(),
     context_window: int = 1,
-    merge_context_window: int = MERGE_CONTEXT_WINDOW,
+    widened_context_window: int = WIDENED_CONTEXT_WINDOW,
     fallback_bracket_cap: int = FALLBACK_BRACKET_CAP,
+    lowconf_below: float = LOWCONF_WIDEN_BELOW,
     fallback_plan: dict[str, dict[str, list[str]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the full candidate list for all chapters.
@@ -882,25 +924,29 @@ def build_candidates(
                 datapoint_id = _make_datapoint_id(ch, block_id, token_start, token_end)
                 en_ctx_ids, en_provenance = _side_context(
                     sent_id,
+                    de_sentence_text,
                     de_index_ch,
                     de_order_ch,
                     de_en_alignments,
                     "en",
                     en_order.get(ch, []),
                     base_window=context_window,
-                    merge_window=merge_context_window,
+                    widened_window=widened_context_window,
                     bracket_cap=fallback_bracket_cap,
+                    lowconf_below=lowconf_below,
                 )
                 zh_ctx_ids, zh_provenance = _side_context(
                     sent_id,
+                    de_sentence_text,
                     de_index_ch,
                     de_order_ch,
                     de_zh_alignments,
                     "zh",
                     zh_order.get(ch, []),
                     base_window=context_window,
-                    merge_window=merge_context_window,
+                    widened_window=widened_context_window,
                     bracket_cap=fallback_bracket_cap,
+                    lowconf_below=lowconf_below,
                 )
                 plan_entry = (fallback_plan or {}).get(datapoint_id)
                 if plan_entry:

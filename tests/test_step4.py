@@ -1280,11 +1280,16 @@ def _build_retrieval_corpus(
     de_en: list[tuple[list[int], list[int]]],
     de_zh: list[tuple[list[int], list[int]]],
     extraction_on: list[int],
+    de_text_overrides: dict[int, str] | None = None,
+    conf_by_de: dict[int, float] | None = None,
 ) -> dict[str, Path]:
     """Tiny Ch.1 corpus for the retrieval-view policy: ``n`` sentences per
     language (ids ``hp1_{lang}_ch01_p{iii}_s001``), alignment records given
     as (de sentence numbers, tgt sentence numbers), and one contracted PP
-    extraction row per DE sentence in ``extraction_on``."""
+    extraction row per DE sentence in ``extraction_on``.
+    ``de_text_overrides`` replaces a DE sentence's text (to exercise the
+    under-segmentation signals); ``conf_by_de`` overrides the record
+    confidence, keyed by the record's first DE sentence number."""
     extraction = tmp_path / "extracted"
     segmented = tmp_path / "segmented"
     aligned = tmp_path / "aligned"
@@ -1292,6 +1297,7 @@ def _build_retrieval_corpus(
     def sids(lang: str) -> list[str]:
         return [f"hp1_{lang}_ch01_p{i:04d}_s001" for i in range(1, n + 1)]
 
+    text_overrides = de_text_overrides or {}
     for lang in ("de", "en", "zh"):
         _write_segments(
             segmented / f"hp1_{lang}_ch01.jsonl",
@@ -1301,13 +1307,14 @@ def _build_retrieval_corpus(
                     "chapter": 1,
                     "paragraph": 1,
                     "sentence": i,
-                    "text": f"synth {lang.upper()} {i}",
+                    "text": text_overrides.get(i, f"synth {lang.upper()} {i}"),
                     "source_pages": [i],
                 }
                 for i, sid in enumerate(sids(lang), start=1)
             ],
         )
 
+    confs = conf_by_de or {}
     for pair, records in (("en", de_en), ("zh", de_zh)):
         _write_alignments(
             aligned / f"hp1_de_{pair}_ch01.jsonl",
@@ -1316,6 +1323,7 @@ def _build_retrieval_corpus(
                     f"a{i:04d}",
                     [sids("de")[d - 1] for d in de_nums],
                     [sids(pair)[t - 1] for t in tgt_nums],
+                    confidence=confs.get(de_nums[0], 0.9),
                 )
                 for i, (de_nums, tgt_nums) in enumerate(records, start=1)
             ],
@@ -1480,3 +1488,99 @@ def test_pilot_tsv_emits_provenance_columns_nonblank(tmp_path: Path) -> None:
                                               "neighbor_fallback", "manual_review"}
         assert r["zh_context_provenance"] in {"anchor_window", "merge_widened",
                                               "neighbor_fallback", "manual_review"}
+
+
+# ----------------------------------- heuristic widening (under-segmented / lowconf)
+
+
+def _plain_alignments(n: int) -> tuple[list, list]:
+    return [([i], [i]) for i in range(1, n + 1)], [([i], [i]) for i in range(1, n + 1)]
+
+
+def test_multi_sentence_de_segment_widens(tmp_path: Path) -> None:
+    # A DE segment packing several sentences (the born-digital layer can
+    # drop periods at turn boundaries): the DP anchors the first of the
+    # target sentences, so the side widens to ±3.
+    de_en, de_zh = _plain_alignments(5)
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=de_en,
+        de_zh=de_zh,
+        extraction_on=[1],
+        de_text_overrides={1: "Erstens. Zweitens. Und ein dritter Satz im Haus."},
+    )
+    cands = _by_seg(_run_builder(paths))
+    c1 = cands["hp1_de_ch01_p0001_s001"]
+    assert c1["en_context_provenance"] == "heuristic_widened"
+    assert c1["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3, 4)]
+
+
+def test_multi_turn_dialogue_de_segment_widens(tmp_path: Path) -> None:
+    de_en, de_zh = _plain_alignments(5)
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=de_en,
+        de_zh=de_zh,
+        extraction_on=[2],
+        de_text_overrides={2: "»Sag was »Nein du »Doch im Haus"},
+    )
+    cands = _by_seg(_run_builder(paths))
+    c2 = cands["hp1_de_ch01_p0002_s001"]
+    assert c2["zh_context_provenance"] == "heuristic_widened"
+
+
+def test_overlong_de_segment_widens(tmp_path: Path) -> None:
+    # Ch.3-style: the text layer dropped every interior period, so the
+    # segment carries one terminal mark but is abnormally long.
+    de_en, de_zh = _plain_alignments(5)
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=de_en,
+        de_zh=de_zh,
+        extraction_on=[1],
+        de_text_overrides={1: "word " * 70 + "im Haus."},
+    )
+    cands = _by_seg(_run_builder(paths))
+    c1 = cands["hp1_de_ch01_p0001_s001"]
+    assert c1["en_context_provenance"] == "heuristic_widened"
+
+
+def test_low_confidence_anchor_widens(tmp_path: Path) -> None:
+    de_en, de_zh = _plain_alignments(5)
+    paths = _build_retrieval_corpus(
+        tmp_path, n=5, de_en=de_en, de_zh=de_zh, extraction_on=[3], conf_by_de={3: 0.38}
+    )
+    cands = _by_seg(_run_builder(paths))
+    c3 = cands["hp1_de_ch01_p0003_s001"]
+    assert c3["en_context_provenance"] == "heuristic_widened"
+    assert c3["zh_context_provenance"] == "heuristic_widened"
+
+
+def test_merge_precedence_over_heuristic(tmp_path: Path) -> None:
+    # Merge + multi-sentence text: both widen, merge labels the provenance.
+    de_zh = [([i], [i]) for i in range(1, 6)]
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=5,
+        de_en=[([1, 2], [1])] + [([i], [i]) for i in range(3, 6)],
+        de_zh=de_zh,
+        extraction_on=[1],
+        de_text_overrides={1: "Erstens. Zweitens im Haus."},
+    )
+    cands = _by_seg(_run_builder(paths))
+    c1 = cands["hp1_de_ch01_p0001_s001"]
+    assert c1["en_context_provenance"] == "merge_widened"
+
+
+def test_clean_short_sentence_stays_anchor_window(tmp_path: Path) -> None:
+    de_en, de_zh = _plain_alignments(5)
+    paths = _build_retrieval_corpus(
+        tmp_path, n=5, de_en=de_en, de_zh=de_zh, extraction_on=[1, 3]
+    )
+    cands = _by_seg(_run_builder(paths))
+    for seg in ("hp1_de_ch01_p0001_s001", "hp1_de_ch01_p0003_s001"):
+        assert cands[seg]["en_context_provenance"] == "anchor_window"
+        assert cands[seg]["zh_context_provenance"] == "anchor_window"
