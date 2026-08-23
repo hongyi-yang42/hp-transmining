@@ -342,3 +342,98 @@ def test_invalid_context_provenance_fails(tmp_path: Path) -> None:
         [_filled_row("dp1", english_context_provenance="guessed")],
     )
     assert _run_validate(csv_path, master) == 2
+
+
+def _pair_row_values(dp: str, en_conf: str, zh_conf: str) -> dict:
+    return {
+        dp: {
+            "chapter": "3",
+            "de_form": "contracted",
+            "de_pp_surface": "im Haus",
+            "de_head_lemma": "Haus",
+            "de_sentence_text": "Er ging ins Haus.",
+            "en_context_text": "He went into the house.",
+            "zh_context_text": "他走进了房子。",
+            "en_alignment_confidence": en_conf,
+            "zh_alignment_confidence": zh_conf,
+        }
+    }
+
+
+def _build_pair(tmp_path: Path, values_by_dp: dict):
+    build = _load_script("build_annotation_csv.py")
+    master = _write_master(tmp_path / "master.tsv", list(values_by_dp), values_by_dp)
+    main_csv = tmp_path / "annotation_pairs.csv"
+    low_csv = tmp_path / "low.csv"
+    rc = build.main([
+        "--master-tsv", str(master), "--output", str(main_csv),
+        "--min-confidence", "0.4", "--low-confidence-output", str(low_csv),
+    ])
+    assert rc == 0
+    return master, main_csv, low_csv
+
+
+def _run_validate_pair(csv_path: Path, master_path: Path, companion: Path, thr: str):
+    mod = _load_script("validate_annotation_csv.py")
+    return mod.main([
+        str(csv_path), "--master-tsv", str(master_path),
+        "--companion-csv", str(companion), "--min-confidence", thr,
+    ])
+
+
+def _write_companion(path: Path, rows: list[dict[str, str]]) -> Path:
+    from hp_corpus.annotation_csv import LOW_CONF_COLUMNS
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(LOW_CONF_COLUMNS), lineterminator="\n")
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: r.get(c, "") for c in LOW_CONF_COLUMNS})
+    return path
+
+
+def test_split_pair_validates(tmp_path: Path, capsys) -> None:
+    values = {}
+    values.update(_pair_row_values("dp1", "0.9", "0.9"))
+    values.update(_pair_row_values("dp2", "0.9", "0.3"))
+    master, main_csv, low_csv = _build_pair(tmp_path, values)
+    assert _run_validate_pair(main_csv, master, low_csv, "0.4") == 0
+    out = capsys.readouterr().out
+    assert "deferred_low_confidence: 1" in out
+
+
+def test_row_moved_between_split_files_fails(tmp_path: Path) -> None:
+    values = {}
+    values.update(_pair_row_values("dp1", "0.9", "0.9"))
+    values.update(_pair_row_values("dp2", "0.9", "0.3"))
+    master, main_csv, low_csv = _build_pair(tmp_path, values)
+    with open(main_csv, encoding="utf-8-sig", newline="") as f:
+        main_rows = list(csv.DictReader(f))
+    with open(low_csv, encoding="utf-8-sig", newline="") as f:
+        low_rows = list(csv.DictReader(f))
+    moved = dict(low_rows[0])
+    main_rows.append({k: moved.get(k, "") for k in main_rows[0]})
+    _write_csv(main_csv, main_rows)
+    _write_companion(low_csv, [])
+    assert _run_validate_pair(main_csv, master, low_csv, "0.4") == 2
+
+
+def test_edited_companion_diagnostic_fails(tmp_path: Path) -> None:
+    values = {}
+    values.update(_pair_row_values("dp1", "0.9", "0.9"))
+    values.update(_pair_row_values("dp2", "0.9", "0.3"))
+    master, main_csv, low_csv = _build_pair(tmp_path, values)
+    with open(low_csv, encoding="utf-8-sig", newline="") as f:
+        low_rows = list(csv.DictReader(f))
+    low_rows[0]["machine_low_conf_sides"] = "en"
+    _write_companion(low_csv, low_rows)
+    assert _run_validate_pair(main_csv, master, low_csv, "0.4") == 2
+
+
+def test_companion_flags_must_be_paired(tmp_path: Path) -> None:
+    master = _write_master(tmp_path / "master.tsv", ["dp1"])
+    csv_path = _write_csv(tmp_path / "returned.csv", [_filled_row("dp1")])
+    mod = _load_script("validate_annotation_csv.py")
+    rc = mod.main([str(csv_path), "--master-tsv", str(master), "--min-confidence", "0.4"])
+    assert rc == 2

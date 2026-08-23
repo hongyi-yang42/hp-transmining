@@ -25,6 +25,27 @@ it is the only input the eligible-pool build reads
   cell by cell, so an edited context or German sentence is rejected even
   when `row_hash` is untouched.
 
+## The confidence split (two files, not one)
+
+The deliverable is split by machine alignment confidence
+(`--min-confidence 0.40`): a row whose **EN or ZH** machine alignment
+confidence is below the threshold is deferred to a companion file,
+`annotation_pairs_low_confidence.csv`, instead of the annotator file.
+The annotator file therefore contains only rows whose retrieval context
+both sides vouch for. Deferred rows keep the master's every column plus
+three diagnostic machine columns
+(`machine_en_alignment_confidence`, `machine_zh_alignment_confidence`,
+`machine_low_conf_sides`) so they can be eyeballed and adjudicated
+standalone; the machine master keeps every row regardless, so the
+eligible-pool join loses nothing. The split is deterministic and
+re-derived by the validator — pass `--companion-csv` +
+`--min-confidence` when validating the pair. Deferred rows are a
+to-be-adjudicated backlog (candidate rescues: manual alignment, the EN
+pivot path), not an exclusion from the study; the threshold's rationale
+(0.40 covers the observed off-by-one failure band while keeping the
+deferred share small and form-balanced) lives in the alignment model
+decision record.
+
 ## Columns
 
 ### Machine columns — read-only, do not edit

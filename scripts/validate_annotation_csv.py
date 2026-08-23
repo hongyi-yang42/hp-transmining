@@ -36,6 +36,14 @@ every annotator cell blank):
     {high, medium, low, not_aligned}.
 
 A partially filled file is NOT template state — content rules run.
+
+Split deliverable (``--companion-csv`` + ``--min-confidence``, both or
+neither): the split is re-derived from the master (fail closed — the
+validator never trusts the file pair to define its own row sets). The main
+CSV's id set must equal the kept rows exactly, and the companion CSV
+(header = CSV_COLUMNS + three diagnostic machine columns) must cover the
+deferred rows exactly, with every machine cell re-derived like the main
+file. Annotation-content rules apply to the main CSV only.
 """
 
 from __future__ import annotations
@@ -53,8 +61,10 @@ from hp_corpus.annotation_csv import (
     DE_VALID_VALUES,
     EN_FORMS,
     EXCLUSION_REASONS,
+    LOW_CONF_COLUMNS,
     MASTER_TO_CSV_COLUMNS,
     ZH_FORMS,
+    split_low_confidence,
 )
 
 EXIT_OK = 0
@@ -93,10 +103,17 @@ def _is_template(rows: list[dict[str, str]]) -> bool:
 
 
 def _binding_errors(
-    csv_rows: list[dict[str, str]], master_rows: dict[str, dict[str, str]]
+    csv_rows: list[dict[str, str]],
+    master_rows: dict[str, dict[str, str]],
+    expected_ids: set[str] | None = None,
 ) -> list[str]:
     """Row-set binding plus machine-column integrity. Rule-level errors
-    only — no row content, no ids."""
+    only — no row content, no ids.
+
+    ``expected_ids=None`` demands the full master id set (unsplit
+    deliverable). For the split deliverable pass the kept-row id set: the
+    CSV must equal it exactly; the deferred rows are validated separately
+    via :func:`_companion_errors`."""
     errors: list[str] = []
 
     ids: list[str] = []
@@ -113,8 +130,14 @@ def _binding_errors(
     master_id_set = set(master_rows)
     if csv_id_set - master_id_set:
         errors.append("ID_NOT_IN_MASTER")
-    if master_id_set - csv_id_set:
-        errors.append("MASTER_ROW_MISSING")
+    if expected_ids is None:
+        if master_id_set - csv_id_set:
+            errors.append("MASTER_ROW_MISSING")
+    else:
+        if csv_id_set - expected_ids:
+            errors.append("ID_NOT_IN_KEPT_SET")
+        if expected_ids - csv_id_set:
+            errors.append("KEPT_ROW_MISSING")
 
     hash_mismatch = False
     edited_columns: set[str] = set()
@@ -149,6 +172,62 @@ def _binding_errors(
     return errors
 
 
+def _companion_errors(
+    companion_rows: list[dict[str, str]],
+    companion_header: list[str],
+    master_rows: dict[str, dict[str, str]],
+    low_diag: dict[str, dict[str, str]],
+) -> list[str]:
+    """Validate the low-confidence companion CSV: header, id set equal to
+    the master-derived split, and machine-cell re-derivation including the
+    three diagnostic columns. Annotation-content rules do not apply — the
+    companion is an analysis/eyeballing artifact, not an annotation
+    deliverable."""
+    errors: list[str] = []
+    if companion_header != list(LOW_CONF_COLUMNS):
+        errors.append("COMPANION_HEADER_MISMATCH")
+        return errors
+    ids: list[str] = []
+    for r in companion_rows:
+        dp = (r.get("id", "") or "").strip()
+        if not dp:
+            errors.append("COMPANION_BLANK_ID")
+        else:
+            ids.append(dp)
+    if len(ids) != len(set(ids)):
+        errors.append("COMPANION_DUPLICATE_ID")
+    id_set = set(ids)
+    if id_set - set(low_diag):
+        errors.append("COMPANION_ID_NOT_LOW_CONF")
+    if set(low_diag) - id_set:
+        errors.append("COMPANION_LOW_CONF_ROW_MISSING")
+
+    edited_columns: set[str] = set()
+    for r in companion_rows:
+        dp = (r.get("id", "") or "").strip()
+        master = master_rows.get(dp)
+        if master is None or dp not in low_diag:
+            continue  # already reported above
+        for master_col, csv_col in MASTER_TO_CSV_COLUMNS.items():
+            expected = (master.get(master_col, "") or "").strip()
+            actual = (r.get(csv_col, "") or "").strip()
+            if actual != expected:
+                edited_columns.add(csv_col)
+        d = low_diag[dp]
+        for csv_col, expected in (
+            ("machine_en_alignment_confidence", d["en"]),
+            ("machine_zh_alignment_confidence", d["zh"]),
+            ("machine_low_conf_sides", d["sides"]),
+        ):
+            if (r.get(csv_col, "") or "").strip() != expected:
+                edited_columns.add(csv_col)
+    if edited_columns:
+        errors.append(
+            "COMPANION_MACHINE_COLUMN_EDITED (" + ", ".join(sorted(edited_columns)) + ")"
+        )
+    return errors
+
+
 def _coupling_errors(row: dict[str, str], lang: str, forms: frozenset[str]) -> list[str]:
     span = (row.get(f"{lang}_counterpart", "") or "").strip()
     form = (row.get(f"{lang}_form", "") or "").strip()
@@ -179,16 +258,20 @@ def validate(
     csv_rows: list[dict[str, str]],
     header: list[str],
     master_rows: dict[str, dict[str, str]],
+    expected_ids: set[str] | None = None,
 ) -> tuple[list[str], dict[str, int]]:
     """Return (errors, summary_counts). Errors are rule-level strings
-    without row content — no text, lemmas, or ids leak."""
+    without row content — no text, lemmas, or ids leak.
+
+    ``expected_ids`` selects split-deliverable binding (see
+    :func:`_binding_errors`); None keeps the full-pool contract."""
     errors: list[str] = []
 
     if header != list(CSV_COLUMNS):
         errors.append("HEADER_MISMATCH")
         return errors, {"rows": len(csv_rows), "template_state": 0}
 
-    errors.extend(_binding_errors(csv_rows, master_rows))
+    errors.extend(_binding_errors(csv_rows, master_rows, expected_ids))
 
     counts = {
         "rows": len(csv_rows),
@@ -230,8 +313,27 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("csv", type=Path, help="the returned annotation CSV")
     ap.add_argument("--master-tsv", type=Path, required=True)
+    ap.add_argument(
+        "--companion-csv",
+        type=Path,
+        default=None,
+        help="low-confidence companion CSV from the split build (required with "
+        "--min-confidence): its ids must be exactly the deferred master rows.",
+    )
+    ap.add_argument(
+        "--min-confidence",
+        type=float,
+        default=None,
+        help="the split threshold the builder used; the split is re-derived "
+        "from the master and both files are checked against it.",
+    )
     args = ap.parse_args(argv)
 
+    if (args.companion_csv is None) != (args.min_confidence is None):
+        return _exit(
+            "SPLIT_FLAGS_PAIRED",
+            "--companion-csv and --min-confidence must be passed together",
+        )
     if not args.csv.exists():
         return _exit("CSV_ABSENT", str(args.csv))
     if not args.master_tsv.exists():
@@ -239,11 +341,33 @@ def main(argv: list[str] | None = None) -> int:
 
     csv_rows, header = read_csv_rows(args.csv)
     master_rows = read_master_rows(args.master_tsv)
-    errors, counts = validate(csv_rows, header, master_rows)
+
+    low_diag: dict[str, dict[str, str]] | None = None
+    expected_ids: set[str] | None = None
+    companion_errors: list[str] = []
+    if args.min_confidence is not None:
+        try:
+            low_diag = split_low_confidence(list(master_rows.values()), args.min_confidence)
+        except ValueError as exc:
+            return _exit("MASTER_INVALID", str(exc))
+        expected_ids = set(master_rows) - set(low_diag)
+
+    errors, counts = validate(csv_rows, header, master_rows, expected_ids)
+
+    if args.companion_csv is not None and low_diag is not None:
+        if not args.companion_csv.exists():
+            return _exit("COMPANION_CSV_ABSENT", str(args.companion_csv))
+        companion_rows, companion_header = read_csv_rows(args.companion_csv)
+        companion_errors = _companion_errors(
+            companion_rows, companion_header, master_rows, low_diag
+        )
+        errors = errors + companion_errors
 
     # Aggregate stdout only — rule names and counts, never row content.
     print(f"rows: {counts['rows']}")
     print(f"template_state: {bool(counts['template_state'])}")
+    if low_diag is not None:
+        print(f"deferred_low_confidence: {len(low_diag)}")
     if counts.get("de_include") or counts.get("de_exclude"):
         print(f"de_valid: include={counts['de_include']} exclude={counts['de_exclude']}")
     if counts.get("en_marked") or counts.get("zh_marked"):

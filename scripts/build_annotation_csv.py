@@ -1,11 +1,12 @@
 """Build the annotator-facing trilingual pair CSV from the machine master.
 
-One deliverable, one pass: every German PP occurrence (Ch.1–17) with
-its aligned English and Chinese context, blank annotation columns for
-the annotator to fill — German validity (include/exclude + corrected
-lemma) and the EN/ZH counterpart marking (span text, form, alignment
-confidence, notes). See ``docs/ANNOTATION_CSV.md`` for the annotator
-instructions and vocabularies.
+Primary deliverable: every German PP occurrence (Ch.1–17) whose EN and ZH
+machine alignment both clear ``--min-confidence``, with its aligned English
+and Chinese retrieval context and blank annotation columns for the
+annotator to fill — German validity (include/exclude + corrected lemma) and
+the EN/ZH counterpart marking (span text, form, alignment confidence,
+notes). See ``docs/ANNOTATION_CSV.md`` for the annotator instructions and
+vocabularies.
 
 The returned file is the single review source for
 ``scripts/build_eligible_pool.py --review-csv``; validate it first with
@@ -19,16 +20,24 @@ dash) are prefixed with one space so spreadsheets parse them as text
 instead of a formula; the return-gate validator compares after
 ``.strip()``, so the prefix round-trips.
 
-Fail-closed rules: master file absent; duplicate master datapoint_ids;
-master header missing required columns; any blank machine cell;
-existing output without --force-output. Stdout carries aggregate counts
-only — never corpus text, lemmas, or ids.
-
-Usage::
+Usage (canonical deliverable — confidence split, threshold 0.40)::
 
     uv run python scripts/build_annotation_csv.py \\
         --master-tsv data/derived/step4/full_novel_annotation_master.tsv \\
-        --output data/derived/annotation/annotation_pairs.csv
+        --output data/derived/annotation/annotation_pairs.csv \\
+        --min-confidence 0.40 \\
+        --low-confidence-output data/derived/annotation/annotation_pairs_low_confidence.csv
+
+The split defers rows whose EN or ZH machine alignment confidence is below
+the threshold to the companion CSV (same columns plus three diagnostic
+machine columns) for later analysis and adjudication; the master keeps
+every row, so nothing is lost and the eligible-pool join is unaffected.
+Omit both flags to emit the unsplit full-pool file (legacy behaviour).
+
+Fail-closed rules: master file absent; duplicate master datapoint_ids;
+master header missing required columns; any blank machine cell;
+existing output without --force-output; only one of the two split flags.
+Stdout carries aggregate counts only — never corpus text, lemmas, or ids.
 """
 
 from __future__ import annotations
@@ -41,8 +50,10 @@ from pathlib import Path
 from hp_corpus.annotation_csv import (
     _EXCEL_SAFE_COLUMNS,
     CSV_COLUMNS,
+    LOW_CONF_COLUMNS,
     MASTER_TO_CSV_COLUMNS,
     excel_safe,
+    split_low_confidence,
 )
 
 EXIT_OK = 0
@@ -101,13 +112,23 @@ def build_csv_rows(master_rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return out
 
 
-def write_csv(path: Path, rows: list[dict[str, str]]) -> Path:
+def write_csv(
+    path: Path, rows: list[dict[str, str]], columns: tuple[str, ...] = CSV_COLUMNS
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(CSV_COLUMNS), lineterminator="\r\n")
+        w = csv.DictWriter(f, fieldnames=list(columns), lineterminator="\r\n")
         w.writeheader()
         w.writerows(rows)
     return path
+
+
+def _count_by_form(rows: list[dict[str, str]]) -> dict[str, int]:
+    n_by_form = {"contracted": 0, "uncontracted": 0}
+    for r in rows:
+        if r["form"] in n_by_form:
+            n_by_form[r["form"]] += 1
+    return n_by_form
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,37 +136,75 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--master-tsv", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument(
+        "--min-confidence",
+        type=float,
+        default=None,
+        help="Defer rows whose EN or ZH machine alignment confidence is below "
+        "this threshold to the low-confidence companion CSV.",
+    )
+    ap.add_argument(
+        "--low-confidence-output",
+        type=Path,
+        default=None,
+        help="Companion CSV path for deferred rows (required with --min-confidence).",
+    )
+    ap.add_argument(
         "--force-output",
         action="store_true",
-        help="Required if the output file already exists.",
+        help="Required if any output file already exists.",
     )
     args = ap.parse_args(argv)
 
+    if (args.min_confidence is None) != (args.low_confidence_output is None):
+        return _exit(
+            "SPLIT_FLAGS_PAIRED",
+            "--min-confidence and --low-confidence-output must be passed together",
+        )
+    if args.min_confidence is not None and not 0.0 <= args.min_confidence <= 1.0:
+        return _exit("MIN_CONFIDENCE_RANGE", str(args.min_confidence))
+
     if not args.master_tsv.exists():
         return _exit("MASTER_TSV_ABSENT", str(args.master_tsv))
-    if args.output.exists() and not args.force_output:
-        return _exit("OUTPUT_EXISTS", f"{args.output}; pass --force-output to overwrite")
+    outputs = [args.output] + ([args.low_confidence_output] if args.low_confidence_output else [])
+    existing = [str(p) for p in outputs if p.exists()]
+    if existing and not args.force_output:
+        return _exit("OUTPUT_EXISTS", f"{'; '.join(existing)}; pass --force-output to overwrite")
 
     try:
         master_rows = read_master_rows(args.master_tsv)
-        csv_rows = build_csv_rows(master_rows)
+        low_diag: dict[str, dict[str, str]] | None = None
+        if args.min_confidence is not None:
+            low_diag = split_low_confidence(master_rows, args.min_confidence)
+        kept_master = [r for r in master_rows if r["datapoint_id"] not in (low_diag or {})]
+        low_master = [r for r in master_rows if r["datapoint_id"] in (low_diag or {})]
+        csv_rows = build_csv_rows(kept_master)
+        low_rows = build_csv_rows(low_master) if low_diag is not None else None
     except ValueError as exc:
         return _exit("MASTER_INVALID", str(exc))
     if not csv_rows:
         return _exit("NO_ROWS", "master has no rows")
 
     write_csv(args.output, csv_rows)
+    if low_rows is not None and low_diag is not None:
+        for r, m in zip(low_rows, low_master, strict=True):
+            d = low_diag[m["datapoint_id"]]
+            r["machine_en_alignment_confidence"] = d["en"]
+            r["machine_zh_alignment_confidence"] = d["zh"]
+            r["machine_low_conf_sides"] = d["sides"]
+        write_csv(args.low_confidence_output, low_rows, columns=LOW_CONF_COLUMNS)
 
     # Aggregate stdout only — no text, lemmas, or ids.
-    n_by_form = {"contracted": 0, "uncontracted": 0}
-    for r in csv_rows:
-        if r["form"] in n_by_form:
-            n_by_form[r["form"]] += 1
     print(f"rows: {len(csv_rows)}")
-    print(f"by_form: {n_by_form}")
-    print(f"columns: {len(CSV_COLUMNS)} ({len(MASTER_TO_CSV_COLUMNS)} machine + "
-          f"{len(CSV_COLUMNS) - len(MASTER_TO_CSV_COLUMNS)} annotator)")
+    print(f"by_form: {_count_by_form(csv_rows)}")
+    if low_rows is not None:
+        print(f"low_confidence_rows: {len(low_rows)}")
+        print(f"low_confidence_by_form: {_count_by_form(low_rows)}")
+    n_cols = len(LOW_CONF_COLUMNS) if low_rows is not None else len(CSV_COLUMNS)
+    print(f"columns: {n_cols} ({len(MASTER_TO_CSV_COLUMNS)} machine + "
+          f"{n_cols - len(MASTER_TO_CSV_COLUMNS)} annotator/diagnostic)")
     print(f"output: {args.output}")
+    if args.low_confidence_output:
+        print(f"low_confidence_output: {args.low_confidence_output}")
     return EXIT_OK
 
 

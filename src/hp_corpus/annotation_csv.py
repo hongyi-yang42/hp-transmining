@@ -158,6 +158,52 @@ _EXCEL_SAFE_COLUMNS = frozenset(
     }
 )
 
+# Diagnostic columns appended (after CSV_COLUMNS) to the low-confidence
+# companion CSV. They restate master machine cells so the excluded rows can
+# be eyeballed and adjudicated without joining back to the master; the
+# return-gate validator re-derives them cell by cell like any machine column.
+LOW_CONF_EXTRA_COLUMNS: tuple[str, ...] = (
+    "machine_en_alignment_confidence",
+    "machine_zh_alignment_confidence",
+    "machine_low_conf_sides",  # "en" | "zh" | "en,zh"
+)
+LOW_CONF_COLUMNS: tuple[str, ...] = CSV_COLUMNS + LOW_CONF_EXTRA_COLUMNS
+
+
+def split_low_confidence(
+    master_rows: list[dict[str, str]], min_confidence: float
+) -> dict[str, dict[str, str]]:
+    """Partition key for the confidence split of the annotator deliverable.
+
+    A row is low-confidence when the EN **or** ZH machine alignment
+    confidence is below ``min_confidence`` — the annotator needs both
+    retrieval contexts reliable, so either side failing is enough to defer
+    the row. Returns ``{datapoint_id: {en, zh, sides}}`` with the master's
+    confidence strings verbatim (no float round-trip, so the builder and
+    the validator compare identical cell text). Raises ValueError on a
+    missing or unparseable confidence cell — the split must fail closed,
+    never silently keep a row whose confidence is unknown."""
+    diag: dict[str, dict[str, str]] = {}
+    for r in master_rows:
+        dp = r.get("datapoint_id", "")
+        sides: list[str] = []
+        confs: dict[str, str] = {}
+        for side in ("en", "zh"):
+            raw = (r.get(f"{side}_alignment_confidence") or "").strip()
+            try:
+                value = float(raw)
+            except ValueError:
+                raise ValueError(
+                    f"unparseable machine {side}_alignment_confidence: {raw!r}"
+                ) from None
+            confs[side] = raw
+            if value < min_confidence:
+                sides.append(side)
+        if sides:
+            diag[dp] = {"en": confs["en"], "zh": confs["zh"], "sides": ",".join(sides)}
+    return diag
+
+
 __all__ = [
     "MACHINE_COLUMNS",
     "ANNOTATOR_COLUMNS",
@@ -170,4 +216,7 @@ __all__ = [
     "CONTEXT_PROVENANCES",
     "excel_safe",
     "MASTER_TO_CSV_COLUMNS",
+    "LOW_CONF_EXTRA_COLUMNS",
+    "LOW_CONF_COLUMNS",
+    "split_low_confidence",
 ]

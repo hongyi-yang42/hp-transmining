@@ -194,3 +194,55 @@ def test_builder_prefixes_formula_unsafe_german_sentence(tmp_path: Path) -> None
     with open(out, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
     assert rows[0]["german_sentence"] == " - «Er ist weg», murmelte Ron."
+
+
+def test_split_defers_low_confidence_rows(tmp_path: Path) -> None:
+    mod = _load_script("build_annotation_csv.py")
+    rows = [
+        _master_row("dp1", en_alignment_confidence="0.9", zh_alignment_confidence="0.9"),
+        _master_row("dp2", en_alignment_confidence="0.9", zh_alignment_confidence="0.3"),
+        _master_row("dp3", en_alignment_confidence="0.2", zh_alignment_confidence="0.5"),
+    ]
+    master = _write_master(tmp_path / "master.tsv", rows)
+    out = tmp_path / "annotation_pairs.csv"
+    low = tmp_path / "low.csv"
+    rc = mod.main([
+        "--master-tsv", str(master), "--output", str(out),
+        "--min-confidence", "0.4", "--low-confidence-output", str(low),
+    ])
+    assert rc == 0
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        main_rows = list(csv.DictReader(f))
+    assert [r["id"] for r in main_rows] == ["dp1"]
+    with open(low, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        low_rows = list(reader)
+        low_header = reader.fieldnames
+    from hp_corpus.annotation_csv import LOW_CONF_EXTRA_COLUMNS
+    assert [r["id"] for r in low_rows] == ["dp2", "dp3"]
+    assert tuple(low_header[-3:]) == LOW_CONF_EXTRA_COLUMNS
+    assert low_rows[0]["machine_low_conf_sides"] == "zh"
+    assert low_rows[0]["machine_zh_alignment_confidence"] == "0.3"
+    assert low_rows[1]["machine_low_conf_sides"] == "en"
+
+
+def test_split_flags_must_be_paired(tmp_path: Path, capsys) -> None:
+    mod = _load_script("build_annotation_csv.py")
+    master = _write_master(
+        tmp_path / "master.tsv",
+        [_master_row("dp1", en_alignment_confidence="0.9", zh_alignment_confidence="0.9")],
+    )
+    rc = mod.main(["--master-tsv", str(master), "--output", str(tmp_path / "a.csv"),
+                   "--min-confidence", "0.4"])
+    assert rc == 2
+    assert "SPLIT_FLAGS_PAIRED" in capsys.readouterr().err
+
+
+def test_split_fails_closed_on_missing_confidence(tmp_path: Path) -> None:
+    mod = _load_script("build_annotation_csv.py")
+    master = _write_master(tmp_path / "master.tsv", [_master_row("dp1")])
+    rc = mod.main([
+        "--master-tsv", str(master), "--output", str(tmp_path / "a.csv"),
+        "--min-confidence", "0.4", "--low-confidence-output", str(tmp_path / "low.csv"),
+    ])
+    assert rc == 2
