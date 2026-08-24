@@ -103,6 +103,26 @@ LaBSE 落地后的错误画像审计（双向 DP 交叉验证：ZH→DE 反向 1
   全局信号分化：直连 ≥0.7 行 pivot 一致率 98%、<0.35 行分歧率 57%），
   pivot 的 50 例分歧段需判官验证后方可接线。
 
+## 后续决策：切分规则扩展 + 上下文窗口收紧（2026-08-24，交接清理）
+
+对齐交接前的两项小改动，不触碰 LaBSE/DP 对齐本身：
+
+- **切分规则扩展**：在 <0.40 置信度规则之外，EN 或 ZH 任一侧
+  `*_context_provenance` ∈ {`manual_review`, `neighbor_fallback`}
+  （机器无正常可靠锚点/上下文）的行同样转入 companion CSV。实现于
+  `hp_corpus.annotation_csv.split_low_confidence`（builder 与 validator
+  共用，validator 仍从 master 重推切分闭环校验），不加新列、不加新
+  reason 分类；`machine_low_conf_sides` 语义 = 触发切分的侧。现行量：
+  1303 保留 / 89 切分（置信度规则单独为 88，provenance 规则净增 1）。
+  切分行只是当前阶段分离待检，不是研究排除。
+- **上下文窗口收紧**：routine ±1 不变；加宽（merge / 疑似 DE 欠切分 /
+  机器置信度 <0.50）由 ±3 收紧为**每侧至多 ±2，且加宽窗口总长 ≤5 个
+  目标句**（`candidates.budgeted_window`；锚组完整保留，预算只限制新增
+  邻句，不再为长尾难例扩到 ±3/±4/±5）。重建后 26 个回归 case 侧全部
+  通过（25 in-context + 1 manual_review），加宽窗口长度由 4–11 句降为
+  ≤5 句；窗口覆盖不到的难例走 fallback plan → `manual_review` →
+  companion 路径，而非加窗救援。
+
 ## 产物索引
 
 | 内容 | 位置（gitignored） |

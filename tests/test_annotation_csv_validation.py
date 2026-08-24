@@ -431,6 +431,33 @@ def test_edited_companion_diagnostic_fails(tmp_path: Path) -> None:
     assert _run_validate_pair(main_csv, master, low_csv, "0.4") == 2
 
 
+def test_provenance_deferred_row_validates_and_cannot_return_to_main(tmp_path: Path) -> None:
+    # High machine confidence but zh provenance neighbor_fallback: the
+    # split re-derivation defers the row, the built pair validates, and
+    # smuggling the row back into the annotator file fails closed.
+    values = {}
+    values.update(_pair_row_values("dp1", "0.9", "0.9"))
+    deferred = _pair_row_values("dp2", "0.9", "0.9")
+    deferred["dp2"]["zh_context_provenance"] = "neighbor_fallback"
+    values.update(deferred)
+    master, main_csv, low_csv = _build_pair(tmp_path, values)
+    with open(low_csv, encoding="utf-8-sig", newline="") as f:
+        low_rows = list(csv.DictReader(f))
+    assert [r["id"] for r in low_rows] == ["dp2"]
+    assert low_rows[0]["machine_low_conf_sides"] == "zh"
+    assert _run_validate_pair(main_csv, master, low_csv, "0.4") == 0
+
+    with open(main_csv, encoding="utf-8-sig", newline="") as f:
+        main_rows = list(csv.DictReader(f))
+    with open(low_csv, encoding="utf-8-sig", newline="") as f:
+        low_rows = list(csv.DictReader(f))
+    moved = dict(low_rows[0])
+    main_rows.append({k: moved.get(k, "") for k in main_rows[0]})
+    _write_csv(main_csv, main_rows)
+    _write_companion(low_csv, [])
+    assert _run_validate_pair(main_csv, master, low_csv, "0.4") == 2
+
+
 def test_companion_flags_must_be_paired(tmp_path: Path) -> None:
     master = _write_master(tmp_path / "master.tsv", ["dp1"])
     csv_path = _write_csv(tmp_path / "returned.csv", [_filled_row("dp1")])

@@ -158,14 +158,21 @@ _EXCEL_SAFE_COLUMNS = frozenset(
     }
 )
 
+# Retrieval provenances that defer a row to the companion CSV at the
+# current machine-alignment stage: the machine has no normal reliable
+# anchor/context on that side (anchorless bracket fallback, or a reviewed
+# locus outside the machine window). Deferred rows await later inspection
+# and adjudication — they are not excluded from the study.
+DEFER_PROVENANCES: frozenset[str] = frozenset({"manual_review", "neighbor_fallback"})
+
 # Diagnostic columns appended (after CSV_COLUMNS) to the low-confidence
-# companion CSV. They restate master machine cells so the excluded rows can
+# companion CSV. They restate master machine cells so the deferred rows can
 # be eyeballed and adjudicated without joining back to the master; the
 # return-gate validator re-derives them cell by cell like any machine column.
 LOW_CONF_EXTRA_COLUMNS: tuple[str, ...] = (
     "machine_en_alignment_confidence",
     "machine_zh_alignment_confidence",
-    "machine_low_conf_sides",  # "en" | "zh" | "en,zh"
+    "machine_low_conf_sides",  # "en" | "zh" | "en,zh" — sides that triggered the deferral
 )
 LOW_CONF_COLUMNS: tuple[str, ...] = CSV_COLUMNS + LOW_CONF_EXTRA_COLUMNS
 
@@ -175,14 +182,21 @@ def split_low_confidence(
 ) -> dict[str, dict[str, str]]:
     """Partition key for the confidence split of the annotator deliverable.
 
-    A row is low-confidence when the EN **or** ZH machine alignment
-    confidence is below ``min_confidence`` — the annotator needs both
-    retrieval contexts reliable, so either side failing is enough to defer
-    the row. Returns ``{datapoint_id: {en, zh, sides}}`` with the master's
+    A row is deferred when either side fails the machine-reliability check:
+    its EN **or** ZH machine alignment confidence is below
+    ``min_confidence``, or its ``{side}_context_provenance`` is in
+    DEFER_PROVENANCES (``manual_review`` / ``neighbor_fallback`` — the
+    machine has no normal reliable anchor/context there). The annotator
+    needs both retrieval contexts reliable, so either side failing is
+    enough to defer the row. Deferred rows are separated for later
+    inspection and adjudication, not excluded from the study.
+
+    Returns ``{datapoint_id: {en, zh, sides}}`` with the master's
     confidence strings verbatim (no float round-trip, so the builder and
-    the validator compare identical cell text). Raises ValueError on a
-    missing or unparseable confidence cell — the split must fail closed,
-    never silently keep a row whose confidence is unknown."""
+    the validator compare identical cell text); ``sides`` lists the sides
+    that triggered the deferral. Raises ValueError on a missing,
+    unparseable, or out-of-vocabulary cell — the split must fail closed,
+    never silently keep a row whose reliability is unknown."""
     diag: dict[str, dict[str, str]] = {}
     for r in master_rows:
         dp = r.get("datapoint_id", "")
@@ -197,7 +211,12 @@ def split_low_confidence(
                     f"unparseable machine {side}_alignment_confidence: {raw!r}"
                 ) from None
             confs[side] = raw
-            if value < min_confidence:
+            provenance = (r.get(f"{side}_context_provenance") or "").strip()
+            if provenance not in CONTEXT_PROVENANCES:
+                raise ValueError(
+                    f"invalid machine {side}_context_provenance: {provenance!r}"
+                )
+            if value < min_confidence or provenance in DEFER_PROVENANCES:
                 sides.append(side)
         if sides:
             diag[dp] = {"en": confs["en"], "zh": confs["zh"], "sides": ",".join(sides)}
@@ -218,5 +237,6 @@ __all__ = [
     "MASTER_TO_CSV_COLUMNS",
     "LOW_CONF_EXTRA_COLUMNS",
     "LOW_CONF_COLUMNS",
+    "DEFER_PROVENANCES",
     "split_low_confidence",
 ]

@@ -6,6 +6,8 @@ import pytest
 
 from hp_corpus.candidates import (
     WindowCandidate,
+    budgeted_window,
+    budgeted_window_ids,
     candidate_window,
     neighbor_bracket,
     window_ids,
@@ -59,6 +61,61 @@ def test_window_candidate_is_frozen_dataclass() -> None:
     c = WindowCandidate(segment_id="x", in_anchor=True)
     with pytest.raises((AttributeError, TypeError)):
         c.in_anchor = False  # type: ignore[misc]
+
+
+# --------------------------------------------------------------- budgeted_window
+
+
+def test_budgeted_single_anchor_gets_five_segment_view() -> None:
+    order = _order()
+    win = budgeted_window([order[4]], order, max_w=2, budget=5)
+    assert [c.segment_id for c in win] == order[2:7]
+    assert [c.in_anchor for c in win] == [False, False, True, False, False]
+
+
+def test_budgeted_two_segment_anchor_splits_remaining_right() -> None:
+    # Anchor span 2 leaves budget for 3 neighbours: one left, two right
+    # (the odd slot goes to the right, in reading order).
+    order = _order()
+    win = budgeted_window([order[4], order[5]], order, max_w=2, budget=5)
+    assert [c.segment_id for c in win] == order[3:8]
+    assert [c.in_anchor for c in win] == [False, True, True, False, False]
+
+
+def test_budgeted_four_segment_anchor_adds_one_right() -> None:
+    order = _order()
+    assert budgeted_window_ids([order[3], order[4], order[5], order[6]], order) == order[3:8]
+
+
+def test_budgeted_anchor_filling_budget_gets_no_added_context() -> None:
+    # The budget limits added neighbours, never the anchor group itself.
+    order = _order()
+    assert budgeted_window_ids([order[2], order[3], order[4], order[5], order[6]], order) \
+        == order[2:7]
+    assert budgeted_window_ids(order[0:8], order) == order[0:8]
+
+
+def test_budgeted_noncontiguous_anchor_spans_min_to_max() -> None:
+    # Like candidate_window, the slice runs min..max of the anchor
+    # positions; in-between sentences belong to the window but not the
+    # anchor.
+    order = _order()
+    win = budgeted_window([order[2], order[4]], order)
+    assert [c.segment_id for c in win] == order[1:6]
+    assert [c.in_anchor for c in win] == [False, True, False, True, False]
+
+
+def test_budgeted_clamps_at_chapter_edges_without_compensation() -> None:
+    # Edge clamping is never compensated on the other side.
+    order = _order()
+    assert budgeted_window_ids([order[0]], order) == order[0:3]
+    assert budgeted_window_ids([order[-1]], order) == order[-3:]
+
+
+def test_budgeted_empty_and_unknown_anchors() -> None:
+    assert budgeted_window([], _order()) == []
+    with pytest.raises(ValueError, match="not found in chapter order"):
+        budgeted_window(["bogus_id"], _order())
 
 
 # --------------------------------------------------------------- neighbor_bracket

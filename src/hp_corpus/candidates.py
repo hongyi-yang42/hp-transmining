@@ -85,6 +85,59 @@ def window_ids(
     return [c.segment_id for c in candidate_window(anchor_ids, chapter_order, w)]
 
 
+def budgeted_window(
+    anchor_ids: list[str],
+    chapter_order: list[str],
+    *,
+    max_w: int = 2,
+    budget: int = 5,
+) -> list[WindowCandidate]:
+    """Widened view for suspicious sides: anchor group plus a bounded
+    amount of neighbouring context.
+
+    The anchor group's contiguous corpus-order span is always preserved in
+    full; the budget bounds only the *added* neighbours. The window adds
+    at most ``max_w`` sentences per side and at most ``budget`` sentences
+    in total, so a single-sentence anchor gets a five-sentence reading
+    view while an anchor group that already fills the budget gets no
+    extra context. When the budget leaves an odd slot, the right side
+    gets it (reading order). Clamped at chapter edges; edge clamping is
+    never compensated on the other side — the view stays simple.
+
+    Empty anchor and unknown anchor ids behave like
+    :func:`candidate_window`."""
+    if not anchor_ids:
+        return []
+    index = {sid: i for i, sid in enumerate(chapter_order)}
+    missing = [sid for sid in anchor_ids if sid not in index]
+    if missing:
+        raise ValueError(f"anchor segment ids not found in chapter order: {missing[:3]}")
+    positions = [index[sid] for sid in anchor_ids]
+    lo_a, hi_a = min(positions), max(positions)
+    remaining = max(0, budget - (hi_a - lo_a + 1))
+    w_left = min(max_w, remaining // 2)
+    w_right = min(max_w, remaining - w_left)
+    lo = max(0, lo_a - w_left)
+    hi = min(len(chapter_order), hi_a + 1 + w_right)
+    anchor_set = set(anchor_ids)
+    return [
+        WindowCandidate(segment_id=sid, in_anchor=sid in anchor_set) for sid in chapter_order[lo:hi]
+    ]
+
+
+def budgeted_window_ids(
+    anchor_ids: list[str],
+    chapter_order: list[str],
+    *,
+    max_w: int = 2,
+    budget: int = 5,
+) -> list[str]:
+    """Convenience: just the ordered ids of :func:`budgeted_window`."""
+    return [
+        c.segment_id for c in budgeted_window(anchor_ids, chapter_order, max_w=max_w, budget=budget)
+    ]
+
+
 def neighbor_bracket(
     prev_anchor_ids: list[str],
     next_anchor_ids: list[str],

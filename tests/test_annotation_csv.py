@@ -226,6 +226,67 @@ def test_split_defers_low_confidence_rows(tmp_path: Path) -> None:
     assert low_rows[1]["machine_low_conf_sides"] == "en"
 
 
+def test_split_defers_unreliable_provenance_rows(tmp_path: Path) -> None:
+    # Provenance manual_review / neighbor_fallback on either side defers
+    # the row even at high machine confidence — the machine has no normal
+    # reliable anchor/context there. Deferred rows are separated for later
+    # inspection, not excluded from the study (the master keeps them all).
+    mod = _load_script("build_annotation_csv.py")
+    rows = [
+        _master_row("dp1", en_alignment_confidence="0.9", zh_alignment_confidence="0.9"),
+        _master_row(
+            "dp2",
+            en_alignment_confidence="0.9",
+            zh_alignment_confidence="0.9",
+            zh_context_provenance="neighbor_fallback",
+        ),
+        _master_row(
+            "dp3",
+            en_alignment_confidence="0.9",
+            zh_alignment_confidence="0.9",
+            en_context_provenance="manual_review",
+        ),
+    ]
+    master = _write_master(tmp_path / "master.tsv", rows)
+    out = tmp_path / "annotation_pairs.csv"
+    low = tmp_path / "low.csv"
+    rc = mod.main([
+        "--master-tsv", str(master), "--output", str(out),
+        "--min-confidence", "0.4", "--low-confidence-output", str(low),
+    ])
+    assert rc == 0
+    with open(out, encoding="utf-8-sig", newline="") as f:
+        main_rows = list(csv.DictReader(f))
+    assert [r["id"] for r in main_rows] == ["dp1"]
+    with open(low, encoding="utf-8-sig", newline="") as f:
+        low_rows = list(csv.DictReader(f))
+    assert [r["id"] for r in low_rows] == ["dp2", "dp3"]
+    assert low_rows[0]["machine_low_conf_sides"] == "zh"
+    assert low_rows[0]["machine_zh_alignment_confidence"] == "0.9"
+    assert low_rows[1]["machine_low_conf_sides"] == "en"
+
+
+def test_split_fails_closed_on_invalid_provenance(tmp_path: Path) -> None:
+    mod = _load_script("build_annotation_csv.py")
+    rows = [
+        _master_row(
+            "dp1",
+            en_alignment_confidence="0.9",
+            zh_alignment_confidence="0.9",
+            zh_context_provenance="guessed",
+        ),
+    ]
+    master = _write_master(tmp_path / "master.tsv", rows)
+    rc = mod.main([
+        "--master-tsv", str(master),
+        "--output", str(tmp_path / "o.csv"),
+        "--min-confidence", "0.4",
+        "--low-confidence-output", str(tmp_path / "low.csv"),
+    ])
+    assert rc == 2
+    assert not (tmp_path / "o.csv").exists()
+
+
 def test_split_flags_must_be_paired(tmp_path: Path, capsys) -> None:
     mod = _load_script("build_annotation_csv.py")
     master = _write_master(

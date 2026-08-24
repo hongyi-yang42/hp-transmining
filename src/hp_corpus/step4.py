@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .candidates import neighbor_bracket, window_ids
+from .candidates import budgeted_window_ids, neighbor_bracket, window_ids
 
 # --------------------------------------------------------------------- constants
 
@@ -209,8 +209,8 @@ CONTEXT_COLUMNS: tuple[str, ...] = (
     "zh_context_provenance",
 )
 
-# Window width for anchor sides widened by any signal; base width is
-# ``context_window`` (±1). Widening signals (any one widens to ±3):
+# Window bounds for anchor sides; base width is ``context_window`` (±1).
+# Widening signals (any one widens the window):
 #
 # * ``merge`` — the alignment record merged several DE sentences (N:M);
 #   the anchor can sit on the wrong target sentence.
@@ -223,9 +223,18 @@ CONTEXT_COLUMNS: tuple[str, ...] = (
 # * low anchor confidence (< LOWCONF_WIDEN_BELOW) — the DP itself flags
 #   local-reordering anchors as uncertain.
 #
+# A widened side expands the anchor group by at most
+# WIDENED_CONTEXT_WINDOW sentences per side within a total reading
+# budget of WIDENED_CONTEXT_BUDGET target sentences (anchor group always
+# preserved; see ``candidates.budgeted_window``). The window is never
+# extended past these bounds to rescue difficult tail cases — sides the
+# window cannot cover are flagged ``manual_review`` via the fallback
+# plan and deferred to the companion CSV instead.
+#
 # Anchorless sides fall back to a neighbour bracket capped at
 # FALLBACK_BRACKET_CAP target sentences.
-WIDENED_CONTEXT_WINDOW = 3
+WIDENED_CONTEXT_WINDOW = 2
+WIDENED_CONTEXT_BUDGET = 5
 LONG_SEGMENT_THRESHOLD = 280  # chars; p95 of DE PP sentences ≈ 260
 LOWCONF_WIDEN_BELOW = 0.5
 FALLBACK_BRACKET_CAP = 6
@@ -723,16 +732,19 @@ def _side_context(
     *,
     base_window: int,
     widened_window: int,
+    widened_budget: int,
     bracket_cap: int,
     lowconf_below: float,
 ) -> tuple[list[str], str]:
     """Retrieval view for one target side of one DE sentence.
 
     Returns ``(context_ids, provenance)``. Anchored sides expand the anchor
-    group by ``base_window`` — or ``widened_window`` when a widening signal
-    fires (N:M merge, suspected under-segmented German segment, or
-    low-confidence anchor); see the constants block above for why each
-    signal marks a known wrong-window failure class.
+    group by ``base_window`` — or the budgeted widened window (at most
+    ``widened_window`` per side, ``widened_budget`` total, anchor group
+    always preserved) when a widening signal fires (N:M merge, suspected
+    under-segmented German segment, or low-confidence anchor); see the
+    constants block above for why each signal marks a known wrong-window
+    failure class.
     Anchorless sides (DP 1:0 gaps, typically a translation merged into a
     neighbouring sentence) are bracketed between the target anchors of the
     nearest DE neighbours that do align; an unusable bracket yields an empty
@@ -746,9 +758,15 @@ def _side_context(
         suspect = _suspect_undersegmented(de_text)
         lowconf = rec is not None and rec.confidence < lowconf_below
         widen = merge or suspect or lowconf
-        ids = window_ids(
-            side.sentence_ids, tgt_order_ch, widened_window if widen else base_window
-        )
+        if widen:
+            ids = budgeted_window_ids(
+                side.sentence_ids,
+                tgt_order_ch,
+                max_w=widened_window,
+                budget=widened_budget,
+            )
+        else:
+            ids = window_ids(side.sentence_ids, tgt_order_ch, base_window)
         if merge:
             provenance = "merge_widened"
         elif suspect or lowconf:
@@ -835,6 +853,7 @@ def build_candidates(
     zero_hits_ok: frozenset[tuple[int, str]] = frozenset(),
     context_window: int = 1,
     widened_context_window: int = WIDENED_CONTEXT_WINDOW,
+    widened_context_budget: int = WIDENED_CONTEXT_BUDGET,
     fallback_bracket_cap: int = FALLBACK_BRACKET_CAP,
     lowconf_below: float = LOWCONF_WIDEN_BELOW,
     fallback_plan: dict[str, dict[str, list[str]]] | None = None,
@@ -932,6 +951,7 @@ def build_candidates(
                     en_order.get(ch, []),
                     base_window=context_window,
                     widened_window=widened_context_window,
+                    widened_budget=widened_context_budget,
                     bracket_cap=fallback_bracket_cap,
                     lowconf_below=lowconf_below,
                 )
@@ -945,6 +965,7 @@ def build_candidates(
                     zh_order.get(ch, []),
                     base_window=context_window,
                     widened_window=widened_context_window,
+                    widened_budget=widened_context_budget,
                     bracket_cap=fallback_bracket_cap,
                     lowconf_below=lowconf_below,
                 )

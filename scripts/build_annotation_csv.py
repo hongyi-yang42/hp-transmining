@@ -20,7 +20,7 @@ dash) are prefixed with one space so spreadsheets parse them as text
 instead of a formula; the return-gate validator compares after
 ``.strip()``, so the prefix round-trips.
 
-Usage (canonical deliverable — confidence split, threshold 0.40)::
+Usage (canonical deliverable — machine-reliability split, threshold 0.40)::
 
     uv run python scripts/build_annotation_csv.py \\
         --master-tsv data/derived/step4/full_novel_annotation_master.tsv \\
@@ -28,10 +28,14 @@ Usage (canonical deliverable — confidence split, threshold 0.40)::
         --min-confidence 0.40 \\
         --low-confidence-output data/derived/annotation/annotation_pairs_low_confidence.csv
 
-The split defers rows whose EN or ZH machine alignment confidence is below
-the threshold to the companion CSV (same columns plus three diagnostic
-machine columns) for later analysis and adjudication; the master keeps
-every row, so nothing is lost and the eligible-pool join is unaffected.
+The split defers a row to the companion CSV (same columns plus three
+diagnostic machine columns) when either side fails the machine-reliability
+check: EN or ZH alignment confidence below the threshold, or EN/ZH context
+provenance ``manual_review`` / ``neighbor_fallback`` (no normal reliable
+anchor/context; see ``hp_corpus.annotation_csv.DEFER_PROVENANCES``).
+Deferred rows are separated at the current machine-alignment stage for
+later inspection and adjudication — not excluded from the study; the
+master keeps every row, so the eligible-pool join is unaffected.
 Omit both flags to emit the unsplit full-pool file (legacy behaviour).
 
 Fail-closed rules: master file absent; duplicate master datapoint_ids;

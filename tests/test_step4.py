@@ -1370,8 +1370,9 @@ def _by_seg(candidates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def test_merge_record_widens_window_and_flags_provenance(tmp_path: Path) -> None:
     # DE s001+s002 merge into one EN sentence (the Ch.14 failure class):
-    # the s001 side gets a ±3 window flagged merge_widened; s003 is a plain
-    # 1:1 and keeps the ±1 anchor_window view.
+    # the s001 side gets the budgeted widened window (±2, five-segment
+    # reading budget; clamped at the chapter start) flagged merge_widened;
+    # s003 is a plain 1:1 and keeps the ±1 anchor_window view.
     paths = _build_retrieval_corpus(
         tmp_path,
         n=5,
@@ -1382,10 +1383,28 @@ def test_merge_record_widens_window_and_flags_provenance(tmp_path: Path) -> None
     cands = _by_seg(_run_builder(paths))
     c1 = cands["hp1_de_ch01_p0001_s001"]
     assert c1["en_context_provenance"] == "merge_widened"
-    assert c1["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3, 4)]
+    assert c1["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3)]
     c3 = cands["hp1_de_ch01_p0003_s001"]
     assert c3["en_context_provenance"] == "anchor_window"
     assert c3["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3)]
+
+
+def test_merge_widened_window_respects_five_segment_budget(tmp_path: Path) -> None:
+    # A 2:2 merge mid-chapter: the two-sentence anchor keeps its full
+    # span and the budget allows only three more neighbours (one left,
+    # two right) — five target segments total, never more.
+    paths = _build_retrieval_corpus(
+        tmp_path,
+        n=8,
+        de_en=[([1], [1]), ([2], [2]), ([3, 4], [3, 4])] + [([i], [i]) for i in range(5, 9)],
+        de_zh=[([i], [i]) for i in range(1, 9)],
+        extraction_on=[3],
+    )
+    cands = _by_seg(_run_builder(paths))
+    c3 = cands["hp1_de_ch01_p0003_s001"]
+    assert c3["en_context_provenance"] == "merge_widened"
+    assert c3["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (2, 3, 4, 5, 6)]
+    assert len(c3["en_context_ids"]) == 5
 
 
 def test_anchorless_side_falls_back_to_neighbor_bracket(tmp_path: Path) -> None:
@@ -1500,7 +1519,8 @@ def _plain_alignments(n: int) -> tuple[list, list]:
 def test_multi_sentence_de_segment_widens(tmp_path: Path) -> None:
     # A DE segment packing several sentences (the born-digital layer can
     # drop periods at turn boundaries): the DP anchors the first of the
-    # target sentences, so the side widens to ±3.
+    # target sentences, so the side widens within the budget (±2 per side,
+    # five segments total; clamped at the chapter start).
     de_en, de_zh = _plain_alignments(5)
     paths = _build_retrieval_corpus(
         tmp_path,
@@ -1513,7 +1533,7 @@ def test_multi_sentence_de_segment_widens(tmp_path: Path) -> None:
     cands = _by_seg(_run_builder(paths))
     c1 = cands["hp1_de_ch01_p0001_s001"]
     assert c1["en_context_provenance"] == "heuristic_widened"
-    assert c1["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3, 4)]
+    assert c1["en_context_ids"] == [f"hp1_en_ch01_p{i:04d}_s001" for i in (1, 2, 3)]
 
 
 def test_multi_turn_dialogue_de_segment_widens(tmp_path: Path) -> None:

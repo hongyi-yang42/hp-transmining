@@ -27,19 +27,22 @@ it is the only input the eligible-pool build reads
 
 ## The confidence split (two files, not one)
 
-The deliverable is split by machine alignment confidence
-(`--min-confidence 0.40`): a row whose **EN or ZH** machine alignment
-confidence is below the threshold is deferred to a companion file,
-`annotation_pairs_low_confidence.csv`, instead of the annotator file.
-The annotator file therefore contains only rows whose retrieval context
-both sides vouch for. Deferred rows keep the master's every column plus
-three diagnostic machine columns
+The deliverable is split by machine reliability (`--min-confidence 0.40`):
+a row is deferred to the companion file,
+`annotation_pairs_low_confidence.csv`, instead of the annotator file when
+either side fails the check — its **EN or ZH** machine alignment
+confidence is below the threshold, **or** its EN/ZH context provenance is
+`manual_review` / `neighbor_fallback` (the machine has no normal reliable
+anchor or context on that side). The annotator file therefore contains
+only rows whose retrieval context both sides vouch for. Deferred rows
+keep the master's every column plus three diagnostic machine columns
 (`machine_en_alignment_confidence`, `machine_zh_alignment_confidence`,
 `machine_low_conf_sides`) so they can be eyeballed and adjudicated
 standalone; the machine master keeps every row regardless, so the
 eligible-pool join loses nothing. The split is deterministic and
 re-derived by the validator — pass `--companion-csv` +
-`--min-confidence` when validating the pair. Deferred rows are a
+`--min-confidence` when validating the pair. Deferred rows are separated
+at the current machine-alignment stage for later inspection — a
 to-be-adjudicated backlog (candidate rescues: manual alignment, the EN
 pivot path), not an exclusion from the study; the threshold's rationale
 (0.40 covers the observed off-by-one failure band while keeping the
@@ -69,9 +72,10 @@ Context-provenance vocabulary:
 - `anchor_window` — the anchor sentence(s) expanded by one neighbour on
   each side. The routine case.
 - `merge_widened` — the alignment merged several German sentences into
-  one record; the window is widened to three neighbours per side because
-  such merges are the known source of off-by-one anchors. Check the
-  context really contains your sentence's translation.
+  one record; the window is widened (up to two neighbours per side,
+  within a five-sentence reading budget) because such merges are the
+  known source of off-by-one anchors. Check the context really contains
+  your sentence's translation.
 - `heuristic_widened` — same widened window, triggered by a suspicion
   signal instead: the German segment packs several sentences or dialogue
   turns (the source's text layer sometimes drops the periods), or the
@@ -81,13 +85,13 @@ Context-provenance vocabulary:
   this side (usually because the translation merged it into a
   neighbouring sentence). The context is the bracket between the nearest
   neighbour anchors, so the translation is typically *inside* one of the
-  bracket sentences rather than standing alone. Judge with that in mind;
-  mark alignment confidence honestly (`not_aligned` if the bracket is
-  clearly the wrong passage).
+  bracket sentences rather than standing alone. Rows carrying this
+  provenance on either side are deferred to the companion file at the
+  current stage.
 - `manual_review` — the retrieval could not reliably cover this side
   (the reviewed true locus sits outside the machine window). The context
-  shown is best-effort; unless you can locate the counterpart in it, set
-  the alignment confidence to `not_aligned`.
+  shown is best-effort. Rows carrying this provenance on either side are
+  deferred to the companion file at the current stage.
 
 ### German review columns
 
