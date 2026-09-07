@@ -31,6 +31,9 @@ dev = [
     "ruff>=0.5",
     "numpy>=1.26",
 ]
+wordalign = [
+    "eflomal>=2.0.0",
+]
 
 [project.scripts]
 hp-corpus = "hp_corpus.cli:main"

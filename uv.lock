@@ -248,6 +248,17 @@ wheels = [
 ]
 
 [[package]]
+name = "eflomal"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cython" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3d/7d/46c02594ebaf7b2f27c671c9d5d517895cf8e58046e41bed95a2cb8394a4/eflomal-2.0.0.tar.gz", hash = "sha256:b71183dcf85bf4f59f44ef7a59f5268df1c17c0c8d8093f77b220025ffdba100", size = 132398, upload-time = "2024-06-20T13:35:13.556Z" }
+
+[[package]]
 name = "emoji"
 version = "2.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -366,9 +377,13 @@ ocr = [
 parse = [
     { name = "stanza" },
 ]
+wordalign = [
+    { name = "eflomal" },
+]
 
 [package.metadata]
 requires-dist = [
+    { name = "eflomal", marker = "extra == 'wordalign'", specifier = ">=2.0.0" },
     { name = "numpy", marker = "extra == 'align'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26" },
     { name = "paddleocr", marker = "extra == 'ocr'", specifier = ">=2.7" },
@@ -382,7 +397,7 @@ requires-dist = [
     { name = "sentence-transformers", marker = "extra == 'align'", specifier = ">=3" },
     { name = "stanza", marker = "extra == 'parse'", specifier = ">=1.5,<2" },
 ]
-provides-extras = ["ocr", "align", "parse", "dev"]
+provides-extras = ["ocr", "align", "parse", "dev", "wordalign"]
 
 [[package]]
 name = "httpcore"
