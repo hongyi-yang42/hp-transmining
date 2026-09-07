@@ -82,7 +82,8 @@ The review covers the **full machine candidate pool** (the master's
 EN/ZH counterpart marking: the **trilingual pair CSV**
 (`annotation_pairs.csv`, built by `scripts/build_annotation_csv.py`,
 one row per occurrence with the German PP, its sentence, and the
-aligned English/Chinese contexts). The annotator fills, per row:
+aligned English/Chinese contexts; machine-unreliable rows are split
+into a low-confidence companion CSV). The annotator fills, per row:
 
 - `de_valid` — `include` / `exclude` (blank or `uncertain` = review not
   finished; the file is rejected until every row is decided);
@@ -100,8 +101,12 @@ to the exact master state.
 ## The eligible pool
 
 `build_eligible_pool.py` reads the complete extraction set, the machine
-master, and the returned annotator CSV (its `de_valid` column is the
-final German decision), and applies the formal rule
+master, and one complete review CSV (its `de_valid` column is the
+final German decision). When the deliverable was split, the complete
+review is the merged file produced by `scripts/merge_companion_review.py`
+from the returned annotator + companion pair and validated by the
+ordinary full run of `scripts/validate_annotation_csv.py` (runbook in
+`docs/ANNOTATION_CSV.md` §After annotation). It applies the formal rule
 (`docs/ANALYSIS_SAMPLE_DESIGN.md` §3):
 
 1. **Preposition inventory** — canonical preposition ∈ the paper's
@@ -162,7 +167,7 @@ identity with conflicting core fields fails the run.
 uv run python scripts/build_eligible_pool.py \
     --extraction-dir data/extracted/full_novel \
     --master-tsv data/derived/step4/full_novel_annotation_master.tsv \
-    --review-csv <returned annotation_pairs.csv> \
+    --review-csv annotation_pairs_merged.csv \
     --out-dir data/derived/eligible_pool
 ```
 
