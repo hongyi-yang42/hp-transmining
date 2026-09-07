@@ -70,11 +70,18 @@ SPAN_STATUSES = ("aligned", "unresolved", "not_aligned")
 
 @dataclass(frozen=True)
 class Token:
-    """The projection of a CoNLL-U token this module needs."""
+    """The projection of a CoNLL-U token this module needs.
+
+    ``head``/``deprel`` carry the dependency edge (1-based head index
+    within the sentence, ``0`` = root) for constituent recovery; older
+    call sites that only pass form/upos/feats keep working.
+    """
 
     form: str
     upos: str
     feats: str
+    head: str = ""
+    deprel: str = ""
 
 
 @dataclass
@@ -118,7 +125,13 @@ def read_conllu(path) -> dict[str, ConlluSentence]:
             if "-" in tid or "." in tid:
                 continue
             tokens.append(
-                Token(form=cols[1], upos=cols[3], feats=cols[5] if len(cols) > 5 else "")
+                Token(
+                    form=cols[1],
+                    upos=cols[3],
+                    feats=cols[5] if len(cols) > 5 else "",
+                    head=cols[6] if len(cols) > 6 else "",
+                    deprel=cols[7] if len(cols) > 7 else "",
+                )
             )
     flush()
     return out
@@ -430,6 +443,12 @@ def english_form(tokens: list[Token]) -> tuple[str, str]:
 _ZH_CLASSIFIER_TAGS = frozenset({"CL", "M"})
 
 
+def _is_zh_classifier(tok: Token) -> bool:
+    """Stanza zh-hans tags most classifiers ``upos=NOUN`` with the
+    ``clf`` dependency relation; some treebanks use upos CL/M."""
+    return tok.upos in _ZH_CLASSIFIER_TAGS or tok.deprel == "clf"
+
+
 def chinese_form(tokens: list[Token]) -> tuple[str, str]:
     """Deterministic ZH paper-form rule. Returns ``(paper_form, detail)``."""
     toks = list(tokens)
@@ -444,7 +463,7 @@ def chinese_form(tokens: list[Token]) -> tuple[str, str]:
     if (
         len(toks) >= 2
         and toks[0].upos in ("NUM", "CD")
-        and toks[1].upos in _ZH_CLASSIFIER_TAGS
+        and _is_zh_classifier(toks[1])
     ):
         return "other", "numeral_classifier"
     if any(t.upos == "PRON" for t in toks) and not any(
