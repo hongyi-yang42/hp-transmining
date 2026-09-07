@@ -92,6 +92,31 @@ def test_map_span_to_tokens_absent_returns_none():
     assert map_span_to_tokens(lay, "") is None
 
 
+def test_map_span_to_tokens_text_hit_without_tokens_tries_next_block():
+    # parse artifact: both blocks repeat the same # text, but each
+    # tokenizes only part of it — the span's tokens live in block 2
+    text = "she wandered off and finally the compass gleamed"
+    lay = SideLayout(
+        block_ids=["syn#b001", "syn#b002"],
+        block_texts=[text, text],
+        token_block=[0] * 4 + [1] * 4,
+        tokens=[
+            tok("she", "PRON"),
+            tok("wandered", "VERB"),
+            tok("off", "ADP"),
+            tok("and", "CCONJ"),
+            tok("finally", "ADV"),
+            tok("the", "DET"),
+            tok("compass", "NOUN"),
+            tok("gleamed", "VERB"),
+        ],
+    )
+    m = map_span_to_tokens(lay, "the compass")
+    assert m is not None
+    assert m.block_slot == 1
+    assert [t.form for t in m.tokens] == ["the", "compass"]
+
+
 # --- realization typing + form recomputation ----------------------------------------
 
 
@@ -270,15 +295,41 @@ def test_route_omission_no_anchor_is_candidate_not_omitted():
 # --- routing: drift + locus -----------------------------------------------------------
 
 
-def test_route_span_outside_aligned_locus_is_disagreement():
+def test_route_span_outside_aligned_locus_is_alignment_scope_conflict():
+    # valid substring of the bounded retrieval context, absent from the
+    # strict DP anchor: scope conflict, NOT a semantic-disagreement claim
     dec = arbitrate_side(
         glm(span="a crate of drills", paper="other", detail="indefinite"),
         local(state="ambiguous_multiple"),
         facts(in_locus_blocks=False),
         "en",
     )
-    assert dec.route == "semantic_disagreement"
+    assert dec.route == "alignment_scope_conflict"
     assert dec.evidence == "glm_span_outside_aligned_locus"
+
+
+def test_route_scope_conflict_fires_even_with_strong_local_choice():
+    # the scope conflict precedes any referent comparison — a strong
+    # local candidate cannot turn it into a semantic claim either way
+    dec = arbitrate_side(
+        glm(span="a crate of drills", paper="other"),
+        local(state="nominal_counterpart", chosen="the cracked vase", evidence="both"),
+        facts(in_locus_blocks=False),
+        "en",
+    )
+    assert dec.route == "alignment_scope_conflict"
+
+
+def test_route_in_block_unmappable_span_stays_llm_only_without_form():
+    dec = arbitrate_side(
+        glm(span="the rusty lantern", paper="definite"),
+        local(state="ambiguous_multiple"),
+        facts(in_locus_blocks=True, mapping=None),
+        "en",
+    )
+    assert dec.route == "llm_only"
+    assert dec.evidence == "llm_span_unmappable"
+    assert dec.paper_form == ""
 
 
 def test_route_outside_locus_without_strict_anchor_stays_llm_only():

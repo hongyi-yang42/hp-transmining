@@ -30,27 +30,48 @@ Two GLM failure modes get explicit guards:
     ``local_only`` (local overt candidate found) or
     ``non_nominal_or_restructured`` (positive verbal-link evidence)
     when independent evidence contradicts it.
-  * semantic-drift guard — the GLM span is checked against the strict
+  * drift/scope guards — the GLM span is checked against the strict
     DP-aligned locus and the local candidate structure. A span that
-    lives outside the aligned locus, or that diverges from a strongly
-    supported local candidate, routes ``semantic_disagreement``
-    instead of being accepted.
+    lives outside the aligned locus but inside the bounded retrieval
+    context is an *alignment-scope* conflict (strict-alignment scope
+    vs retrieval scope — nothing shows the referent itself is wrong);
+    a span that diverges from comparable evidence *within* a usable
+    locus is a genuine ``semantic_disagreement``.
 
 Routing state space (per side, transparent policy — proposal tiers,
 never claimed accuracy):
 
-  machine_agreement          GLM span and the local deterministic
-                             choice identify the same referent.
+  machine_agreement          cross-method-supported machine proposal:
+                             GLM span and the local deterministic
+                             choice identify the same referent. NOT
+                             human-validated and NOT an implied
+                             correctness claim — converging machine
+                             signals can share the same semantic-role
+                             error (development observation), and no
+                             rule here may bypass later validation.
   llm_only                   GLM span is structurally valid but local
                              evidence is unavailable or too weak (no
                              strict anchor, ambiguous/unresolved local
-                             routing).
+                             routing, or no local support at all —
+                             e.g. a same-locus unsupported proposal,
+                             which the current machine stack cannot
+                             resolve automatically).
   local_only                 local evidence found an overt candidate
                              while GLM claims omission or proposes
                              nothing; neither side auto-wins.
-  semantic_disagreement      GLM and local evidence point at genuinely
-                             different realizations (or the GLM span
-                             sits outside the aligned locus).
+  alignment_scope_conflict   the GLM proposal is a valid substring of
+                             the existing bounded retrieval context
+                             but the strict DP anchor does not contain
+                             it — the conflict is between alignment
+                             scope and retrieval scope, with no
+                             independent evidence that the proposed
+                             referent is semantically wrong.
+  semantic_disagreement      reserved for comparable evidence within
+                             a usable translation locus supporting
+                             genuinely different referents or
+                             realizations (divergent local choice, or
+                             consensus verbal links vs a nominal GLM
+                             span).
   non_nominal_or_restructured  positive evidence (verb-led GLM span
                              mapped to parse tokens, or consensus
                              verbal links) that the PP was realized
@@ -66,6 +87,12 @@ never claimed accuracy):
 Evidence strings form a small controlled vocabulary recorded per side
 (``hybrid_{side}_evidence``); the routing policy itself lives in
 :func:`arbitrate_side` as one pure, testable function.
+
+Ontology boundary: the paper-comparable core and the production/human
+annotation codebooks are frozen and untouched by this module. The
+hybrid detail values ``non_nominal`` and ``quantifier`` are machine
+diagnostics of this artifact only — they never enter the production
+detail vocabulary, and both map to the paper core ``other``.
 """
 
 from __future__ import annotations
@@ -87,6 +114,7 @@ HYBRID_ROUTES = (
     "machine_agreement",
     "llm_only",
     "local_only",
+    "alignment_scope_conflict",
     "semantic_disagreement",
     "non_nominal_or_restructured",
     "omission_candidate",
@@ -162,7 +190,7 @@ class SideFacts:
     locus: str  # reliable | no_anchor_context_available | retrieval_not_aligned
     span_in_context: bool  # exact substring of the master retrieval context
     mapping: SpanMapping | None  # span → parse tokens inside the locus blocks
-    in_locus_blocks: bool  # span found inside the strict DP anchor blocks
+    in_locus_blocks: bool  # span is an exact substring of a locus block text
     eflomal_covers_span: bool  # any eflomal-supported candidate covers the span
     contextual_top1_covers: bool  # the contextual rank-1 candidate covers it
 
@@ -174,10 +202,14 @@ def map_span_to_tokens(layout: SideLayout, span: str) -> SpanMapping | None:
     """Locate ``span`` as an exact substring of one layout block and
     collect the parse tokens whose character intervals intersect it.
 
-    Fail-closed: if the span is not found, or a token cannot be located
-    sequentially in the block text, returns ``None``. Tokens partially
-    cut by the span (a model copying a sub-word fragment) still count —
-    classification runs on the full parse tokens, never on fragments.
+    Blocks are tried in order until one yields a non-empty token cover:
+    the parse files contain blocks whose ``# text`` field repeats text
+    tokenized in a neighbouring block, so a textual hit whose tokens
+    live elsewhere must not abort the search. Fail-closed overall: if
+    no block covers the span with tokens, returns ``None``. Tokens
+    partially cut by the span (a model copying a sub-word fragment)
+    still count — classification runs on the full parse tokens, never
+    on fragments.
     """
     span = (span or "").strip()
     if not span:
@@ -194,14 +226,14 @@ def map_span_to_tokens(layout: SideLayout, span: str) -> SpanMapping | None:
         for _, tok in block_tokens:
             m = re.search(rf"\s*{re.escape(tok.form)}", block_text[cursor:])
             if m is None:
-                return None
+                break
             tok_start = cursor + m.end() - len(tok.form)
             tok_end = cursor + m.end()
             cursor = tok_end
             if tok_start < idx + len(span) and tok_end > idx:
                 covered.append(tok)
         if not covered:
-            return None
+            continue
         return SpanMapping(
             block_slot=slot, start_char=idx, end_char=idx + len(span), tokens=covered
         )
@@ -374,13 +406,28 @@ def arbitrate_side(glm: GlmSide, local: LocalSide, facts: SideFacts, lang: str) 
     # --- GLM proposes a span ---------------------------------------------------
     if glm.proposes_span:
         if not facts.in_locus_blocks and facts.locus == "reliable":
-            # The strict DP alignment placed the translation locus
-            # elsewhere; the GLM span sits in the retrieval padding —
-            # the classic drift signature (proposal answers a
-            # different sentence than the aligned one).
+            # The proposal is a valid substring of the bounded retrieval
+            # context (checked above), but the strict DP anchor does not
+            # contain it: the conflict is between alignment scope and
+            # retrieval scope. Nothing here shows the proposed referent
+            # is semantically wrong — this is NOT a semantic
+            # disagreement claim.
             return HybridDecision(
-                "semantic_disagreement", evidence="glm_span_outside_aligned_locus"
+                "alignment_scope_conflict", evidence="glm_span_outside_aligned_locus"
             )
+        if facts.mapping is None:
+            # inside the locus blocks but not mappable to parse tokens
+            # (e.g. the span crosses a block boundary) — the span
+            # stands, no recomputed form; support signals still count
+            if facts.eflomal_covers_span:
+                ev = "llm_eflomal_supported"
+            elif facts.contextual_top1_covers:
+                ev = "llm_contextual_top1"
+            elif facts.in_locus_blocks:
+                ev = "llm_span_unmappable"
+            else:
+                ev = "llm_no_local_support"
+            return HybridDecision("llm_only", counterpart=glm.span, evidence=ev)
         paper, detail, realization = _recomputed(facts, lang)
         correction = (
             (glm.paper_form, glm.detail_form)

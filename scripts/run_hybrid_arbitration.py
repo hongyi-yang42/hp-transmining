@@ -13,9 +13,11 @@ artifacts and the production master,
 and writes one hybrid proposal per language side per row via
 ``hp_corpus.hybrid_arbitration``. The GLM form labels are recomputed
 deterministically from the span's parse tokens; GLM ``omitted`` claims
-are guarded (never final); GLM spans outside the strict DP-aligned
-locus are routed as semantic disagreement. The GLM and deterministic
-artifacts are read-only inputs — outputs land in new files only.
+are guarded (never final); a GLM span inside the bounded retrieval
+context but outside the strict DP anchor routes
+``alignment_scope_conflict`` (a scope conflict, not a semantic claim).
+The GLM and deterministic artifacts are read-only inputs — outputs
+land in new files only.
 
 Stdout discipline: aggregate counts only — never corpus text, spans,
 lemmas, or datapoint ids.
@@ -196,11 +198,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             context_text = mrow.get(f"{side}_context_text") or ""
             span_in_context = bool(glm.span.strip()) and glm.span in context_text
             mapping = None
+            in_locus_blocks = False
             if glm.proposes_span:
                 locus_segments = rec["tgt_segments"] if locus == "reliable" else context_ids
                 layout = build_side_layout(
                     locus_segments, det._merged_sentences(cache, lang, locus_segments)
                 )
+                # scope check is textual containment in the locus
+                # blocks; token mappability is tracked separately
+                in_locus_blocks = any(glm.span in bt for bt in layout.block_texts)
                 mapping = map_span_to_tokens(layout, glm.span)
             cands = _dump_candidates(dump_row.get(side))
             eflomal_covers = any(
@@ -213,7 +219,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 locus=locus,
                 span_in_context=span_in_context,
                 mapping=mapping,
-                in_locus_blocks=mapping is not None,
+                in_locus_blocks=in_locus_blocks,
                 eflomal_covers_span=eflomal_covers,
                 contextual_top1_covers=top1_covers,
             )
@@ -309,7 +315,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             k: {s: dict(sorted(v.items())) for s, v in vv.items()} for k, vv in four_way.items()
         },
         "note": "Hybrid routes are machine proposal tiers, never claimed "
-        "accuracy; GLM agreement is a signal, not gold.",
+        "accuracy. machine_agreement is a cross-method-supported machine "
+        "proposal — NOT human-validated, and converging machine signals "
+        "can share the same semantic-role error. alignment_scope_conflict "
+        "is a scope conflict (strict DP anchor vs retrieval context), not "
+        "a claim that the proposed referent is wrong.",
     }
     report_path = args.output.with_name(args.output.stem + "_run_report.json")
     det.write_json(report_path, report)
