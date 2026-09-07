@@ -11,16 +11,23 @@ from __future__ import annotations
 
 from hp_corpus.deterministic_tuples import SideLayout, Token
 from hp_corpus.hybrid_arbitration import (
+    ELIGIBILITY_COLUMNS,
     HYBRID_COLUMNS,
+    CandidateRef,
+    EligibilityDecision,
     GlmSide,
     LocalSide,
     SideFacts,
     SpanMapping,
     arbitrate_side,
+    build_eligibility_row,
     build_hybrid_row,
+    eligibility_side,
     map_span_to_tokens,
     realization_type,
     recompute_form,
+    recover_containing_constituent,
+    row_eligibility_for,
 )
 
 
@@ -146,11 +153,30 @@ def test_recompute_zh_numeral_classifier_initial_pair():
     assert recompute_form(span, "zh") == ("other", "numeral_classifier")
 
 
-def test_recompute_zh_overt_numeral_anywhere_blocks_bare():
-    # classifier mistagged as plain NOUN by the parser — the overt
-    # numeral alone still defeats a bare reading
+def test_recompute_zh_numeral_presence_alone_is_not_classifier():
+    # 绺 is semantically a measure word but parsed as plain NOUN: no
+    # CL/M tag or clf deprel, so no numeral+classifier construction —
+    # numeral presence alone must not trigger the label
     span = [tok("前面", "NOUN"), tok("一", "NUM"), tok("绺", "NOUN"), tok("头发", "NOUN")]
-    assert recompute_form(span, "zh") == ("other", "numeral_classifier")
+    assert recompute_form(span, "zh") == ("bare", "")
+
+
+def test_recompute_zh_ordinal_and_floor_numeral_not_classifier():
+    # 第二天: ordinal 第-prefix; 九楼: numeral as bare compound modifier
+    ordinal = [tok("第二", "NUM"), tok("天", "NOUN", deprel="clf")]
+    assert recompute_form(ordinal, "zh") == ("bare", "")
+    floor = [tok("九", "NUM"), tok("楼", "NOUN", deprel="nmod")]
+    assert recompute_form(floor, "zh") == ("bare", "")
+
+
+def test_recompute_zh_attributive_de_not_possessive():
+    span = [tok("浓云", "ADJ"), tok("低垂", "ADJ"), tok("的", "SCONJ"), tok("天空", "NOUN")]
+    assert recompute_form(span, "zh") == ("bare", "")
+
+
+def test_recompute_zh_genuine_possessive_kept():
+    span = [tok("他", "PRON"), tok("的", "PART"), tok("弹珠", "NOUN")]
+    assert recompute_form(span, "zh") == ("other", "possessive")
 
 
 def test_recompute_zh_plain_bare_survives():
@@ -509,3 +535,320 @@ def test_build_row_preserves_glm_cells_and_adds_hybrid_columns():
 def test_spanmapping_dataclass_carries_tokens():
     m = SpanMapping(block_slot=0, start_char=0, end_char=3, tokens=[tok("abc", "NOUN")])
     assert m.tokens[0].form == "abc"
+
+
+# --- eligibility gate: constituent recovery ---------------------------------------------
+
+
+def _zh_bed_layout():
+    """床-pattern parse: modifiers attach as siblings, not dependents of
+    the head, so recovery needs the attributive extension."""
+    tokens = [
+        tok("她", "PRON", "nsubj", "2"),
+        tok("睡", "VERB", "root", "0"),
+        tok("了", "PART", "aux", "2"),
+        tok("一", "NUM", "nummod", "5"),
+        tok("张", "NOUN", "clf", "4"),
+        tok("坑", "NOUN", "obj", "2"),
+        tok("洼", "NOUN", "flat", "6"),
+        tok("、", "PUNCT", "punct", "6"),
+        tok("高", "ADJ", "amod", "6"),
+        tok("低", "ADJ", "flat", "9"),
+        tok("的", "SCONJ", "mark:rel", "9"),
+        tok("床上", "NOUN", "obj", "2"),
+        tok("。", "PUNCT", "punct", "2"),
+    ]
+    text = "她睡了一张坑洼、高低的床上。"
+    return SideLayout(
+        block_ids=["syn#b001"], block_texts=[text], token_block=[0] * len(tokens), tokens=tokens
+    )
+
+
+def test_recovery_expands_anchor_to_full_constituent():
+    lay = _zh_bed_layout()
+    m = map_span_to_tokens(lay, "床")
+    rec = recover_containing_constituent(m, lay, "zh")
+    span = lay.block_texts[0][rec.start_char : rec.end_char]
+    assert span == "一张坑洼、高低的床上"
+    assert recompute_form(rec.tokens, "zh") == ("other", "numeral_classifier")
+
+
+def test_recovery_stops_at_aspect_particle():
+    # 了 (PART) terminates the attributive extension; only 的 passes
+    lay = _zh_bed_layout()
+    m = map_span_to_tokens(lay, "床上")
+    rec = recover_containing_constituent(m, lay, "zh")
+    span = lay.block_texts[0][rec.start_char : rec.end_char]
+    assert span == "一张坑洼、高低的床上"
+
+
+def test_recovery_head_skips_compound_modifier():
+    tokens = [
+        tok("the", "DET", "det", "3"),
+        tok("living", "NOUN", "compound", "3"),
+        tok("room", "NOUN", "obj", "4"),
+        tok("gleamed", "VERB", "root", "0"),
+    ]
+    lay = SideLayout(
+        block_ids=["syn#b001"],
+        block_texts=["the living room gleamed"],
+        token_block=[0, 0, 0, 0],
+        tokens=tokens,
+    )
+    m = map_span_to_tokens(lay, "the living room")
+    rec = recover_containing_constituent(m, lay, "en")
+    span = lay.block_texts[0][rec.start_char : rec.end_char]
+    assert span == "the living room"
+    assert recompute_form(rec.tokens, "en") == ("definite", "")
+
+
+def test_recovery_extension_stops_at_sentence_comma():
+    tokens = [
+        tok("醒来", "VERB", "root", "0"),
+        tok("，", "PUNCT", "punct", "1"),
+        tok("浓云", "ADJ", "amod", "5"),
+        tok("低垂", "ADJ", "flat", "3"),
+        tok("的", "SCONJ", "mark:rel", "3"),
+        tok("天空", "NOUN", "nsubj", "1"),
+    ]
+    lay = SideLayout(
+        block_ids=["syn#b001"],
+        block_texts=["醒来，浓云低垂的天空"],
+        token_block=[0] * 6,
+        tokens=tokens,
+    )
+    m = map_span_to_tokens(lay, "天空")
+    rec = recover_containing_constituent(m, lay, "zh")
+    span = lay.block_texts[0][rec.start_char : rec.end_char]
+    assert span == "浓云低垂的天空"
+    assert recompute_form(rec.tokens, "zh") == ("bare", "")
+
+
+# --- eligibility gate: routing -----------------------------------------------------------
+
+
+def _en_small_layout():
+    tokens = [
+        tok("she", "PRON", "nsubj", "2"),
+        tok("stumbled", "VERB", "root", "0"),
+        tok("on", "ADP", "case", "4"),
+        tok("the", "DET", "det", "5"),
+        tok("mat", "NOUN", "obl", "2"),
+    ]
+    lay = SideLayout(
+        block_ids=["syn#b001"],
+        block_texts=["she stumbled on the mat"],
+        token_block=[0] * 5,
+        tokens=tokens,
+    )
+    return lay
+
+
+def test_eligibility_anchor_nominal_is_comparable_with_constituent():
+    lay = _en_small_layout()
+    m = map_span_to_tokens(lay, "mat")
+    dec = eligibility_side(
+        glm(span="mat"),
+        local(state="nominal_counterpart", chosen="the mat", evidence="both"),
+        facts(mapping=m, layout=lay),
+        [],
+        "en",
+    )
+    assert dec.eligibility == "comparable_counterpart"
+    assert dec.counterpart == "the mat"
+    assert dec.paper_form == "definite"
+    assert not dec.requires_review
+
+
+def test_eligibility_verbal_anchor_without_candidate_not_comparable():
+    lay = _en_small_layout()
+    m = map_span_to_tokens(lay, "stumbled")
+    dec = eligibility_side(
+        glm(span="stumbled"),
+        local(state="ambiguous_multiple"),
+        facts(mapping=m, layout=lay),
+        [],
+        "en",
+    )
+    assert dec.eligibility == "no_comparable_nominal_counterpart"
+    assert dec.evidence == "anchor_non_nominal_no_candidate"
+    assert dec.requires_review
+
+
+def test_eligibility_verbal_anchor_with_inner_nominal_recovers_constituent():
+    # the anchor is verb-led but contains nominal tokens: the head
+    # selection picks the inner nominal and recovers its constituent
+    lay = SideLayout(
+        block_ids=["syn#b001"],
+        block_texts=["她打了个趔趄"],
+        token_block=[0] * 4,
+        tokens=[
+            tok("她", "PRON", "nsubj", "2"),
+            tok("打了", "VERB", "root", "0"),
+            tok("个", "NOUN", "clf", "4"),
+            tok("趔趄", "NOUN", "obj", "2"),
+        ],
+    )
+    m = map_span_to_tokens(lay, "打了个趔趄")
+    dec = eligibility_side(
+        glm(span="打了个趔趄"),
+        local(state="nominal_counterpart", chosen="个趔趄", evidence="both"),
+        facts(mapping=m, layout=lay),
+        [],
+        "zh",
+    )
+    assert dec.eligibility == "comparable_counterpart"
+    assert dec.counterpart == "个趔趄"
+    assert dec.evidence == "anchor_nominal_local_agreement"
+
+
+def test_eligibility_pure_verbal_anchor_falls_back_to_candidates():
+    # a purely verbal anchor (no nominal token at all) consults the
+    # saved candidate set before declaring no comparable counterpart
+    lay = SideLayout(
+        block_ids=["syn#b001"],
+        block_texts=["她打了趔趄"],
+        token_block=[0] * 3,
+        tokens=[
+            tok("她", "PRON", "nsubj", "2"),
+            tok("打了", "VERB", "root", "0"),
+            tok("趔趄", "VERB", "xcomp", "2"),
+        ],
+    )
+    m = map_span_to_tokens(lay, "打了趔趄")
+    dec = eligibility_side(
+        glm(span="打了趔趄"),
+        local(state="ambiguous_multiple"),
+        facts(mapping=m, layout=lay),
+        [CandidateRef(span="趔趄", category="noun", ctx_rank=1)],
+        "zh",
+    )
+    assert dec.eligibility == "comparable_counterpart"
+    assert dec.evidence == "anchor_non_nominal_candidate_overlap"
+
+
+def test_eligibility_anchor_outside_locus_unresolved():
+    dec = eligibility_side(
+        glm(span="the fireplace"),
+        local(state="ambiguous_multiple"),
+        facts(mapping=None, in_locus_blocks=False),
+        [],
+        "en",
+    )
+    assert dec.eligibility == "unresolved"
+    assert dec.evidence == "anchor_outside_aligned_locus"
+
+
+def test_eligibility_unreliable_locus_unresolved():
+    dec = eligibility_side(
+        glm(span=""),
+        local(state="retrieval_not_aligned"),
+        facts(locus="retrieval_not_aligned"),
+        [],
+        "zh",
+    )
+    assert dec.eligibility == "unresolved"
+
+
+def test_eligibility_blank_glm_local_candidate():
+    lay = _en_small_layout()
+    dec = eligibility_side(
+        glm(span="", paper="other", detail="omitted"),
+        local(state="nominal_counterpart", chosen="the mat", evidence="both"),
+        facts(layout=lay),
+        [],
+        "en",
+    )
+    assert dec.eligibility == "comparable_counterpart"
+    # span and form fields are never swapped
+    assert dec.counterpart == "the mat"
+    assert dec.paper_form == "definite"
+    assert dec.detail_form == ""
+    assert dec.evidence == "blank_glm_local_candidate"
+
+
+def test_eligibility_blank_glm_ambiguous_unresolved():
+    dec = eligibility_side(
+        glm(span="", paper="other", detail="omitted"),
+        local(state="ambiguous_multiple"),
+        facts(),
+        [],
+        "zh",
+    )
+    assert dec.eligibility == "unresolved"
+    assert dec.evidence == "blank_glm_local_ambiguous"
+
+
+def test_eligibility_blank_glm_verbal_links_not_comparable_not_omitted():
+    dec = eligibility_side(
+        glm(span="", paper="other", detail="omitted"),
+        local(state="non_nominal_realization"),
+        facts(),
+        [],
+        "en",
+    )
+    assert dec.eligibility == "no_comparable_nominal_counterpart"
+    assert dec.evidence == "blank_glm_local_verbal_realization"
+
+
+def test_eligibility_blank_glm_local_absence_not_comparable():
+    dec = eligibility_side(
+        glm(span="", paper="other", detail="omitted"),
+        local(state="no_overt_candidate"),
+        facts(),
+        [],
+        "zh",
+    )
+    assert dec.eligibility == "no_comparable_nominal_counterpart"
+
+
+# --- eligibility gate: row level + artifact ----------------------------------------------
+
+
+def _dec(state):
+    return EligibilityDecision(eligibility=state)
+
+
+def test_row_eligibility_priority():
+    both = {"en": _dec("comparable_counterpart"), "zh": _dec("comparable_counterpart")}
+    assert row_eligibility_for(True, both) == "core_tuple_eligible"
+    excluded = {
+        "en": _dec("comparable_counterpart"),
+        "zh": _dec("no_comparable_nominal_counterpart"),
+    }
+    assert row_eligibility_for(True, excluded) == "excluded_no_comparable_counterpart"
+    # unresolved outranks exclusion: an undecided side is never read as
+    # a linguistic absence
+    mixed = {"en": _dec("no_comparable_nominal_counterpart"), "zh": _dec("unresolved")}
+    assert row_eligibility_for(True, mixed) == "unresolved"
+    assert row_eligibility_for(False, both) == "unresolved"
+
+
+def test_build_eligibility_row_preserves_glm_cells():
+    glm_row = {
+        "id": "syn_dp_002",
+        "german_pp": "ins Wohnzimmer",
+        "machine_en_counterpart": "the living room",
+        "machine_en_status": "aligned",
+        "machine_zh_counterpart": "起居室",
+        "machine_zh_status": "aligned",
+    }
+    decisions = {
+        "en": EligibilityDecision(
+            eligibility="comparable_counterpart",
+            counterpart="the living room",
+            paper_form="definite",
+        ),
+        "zh": EligibilityDecision(
+            eligibility="no_comparable_nominal_counterpart",
+            evidence="anchor_non_nominal_no_candidate",
+        ),
+    }
+    row = build_eligibility_row(glm_row, decisions, "excluded_no_comparable_counterpart")
+    for key, value in glm_row.items():
+        assert row[key] == value
+    assert row["elig_en_state"] == "comparable_counterpart"
+    assert row["elig_zh_state"] == "no_comparable_nominal_counterpart"
+    assert row["elig_zh_counterpart"] == ""
+    assert row["row_eligibility"] == "excluded_no_comparable_counterpart"
+    assert set(row) == set(ELIGIBILITY_COLUMNS)

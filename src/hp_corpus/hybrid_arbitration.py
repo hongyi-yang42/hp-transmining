@@ -103,6 +103,7 @@ from dataclasses import dataclass, field
 from hp_corpus.deterministic_tuples import (
     SideLayout,
     Token,
+    _exact_substring,
     chinese_form,
     english_form,
 )
@@ -193,6 +194,7 @@ class SideFacts:
     in_locus_blocks: bool  # span is an exact substring of a locus block text
     eflomal_covers_span: bool  # any eflomal-supported candidate covers the span
     contextual_top1_covers: bool  # the contextual rank-1 candidate covers it
+    layout: SideLayout | None = None  # locus layout, for constituent recovery
 
 
 # --- span → parse tokens --------------------------------------------------------------
@@ -267,10 +269,31 @@ def realization_type(tokens: list[Token]) -> str:
     return "nominal"
 
 
+def _zh_is_counting_numeral(tok: Token) -> bool:
+    """A counting numeral, not an ordinal like ``第二`` (the ``第``
+    prefix builds lexical ordinals — 第二天 is "the next day", not a
+    numeral+classifier construction)."""
+    return tok.upos in ("NUM", "CD") and not tok.form.startswith("第")
+
+
 def _zh_has_numeral_classifier(tokens: list[Token]) -> bool:
-    """Overt adjacent numeral+classifier pair anywhere in the span."""
+    """Genuine adjacent numeral+classifier construction: a counting
+    numeral directly followed by a classifier token. Numeral presence
+    alone (九楼, 第二天一早) is NOT a classifier construction."""
     for a, b in zip(tokens, tokens[1:], strict=False):
-        if a.upos in ("NUM", "CD") and (b.upos in ("CL", "M") or b.deprel == "clf"):
+        if _zh_is_counting_numeral(a) and (b.upos in ("CL", "M") or b.deprel == "clf"):
+            return True
+    return False
+
+
+def _zh_has_genuine_possessive(tokens: list[Token]) -> bool:
+    """Possessive structure: a pronoun/proper name attached by ``的``
+    (他的 / 哈利的, as one token or two). Attributive ``的`` after an
+    adjective/verb (浓云低垂的天空) is not possession."""
+    for i, t in enumerate(tokens[:-1]):
+        if t.form.endswith("的") and t.upos in ("PRON", "PROPN"):
+            return True
+        if t.form == "的" and i > 0 and tokens[i - 1].upos in ("PRON", "PROPN"):
             return True
     return False
 
@@ -303,16 +326,17 @@ def recompute_form(tokens: list[Token], lang: str) -> tuple[str, str]:
 
     * a verb-led span is a non-nominal realization: ``other`` +
       ``non_nominal`` detail, never a nominal paper form;
-    * a ZH span containing overt numeral marking can never survive as
-      ``bare`` (adjacent NUM+classifier pair, or any overt NUM token —
-      the ZH parser does not reliably tag measure words as
-      classifiers, but an overt numeral alone already defeats a bare
-      reading);
+    * a ZH span is ``numeral_classifier`` only for a genuine adjacent
+      counting-numeral+classifier construction — bare numeral presence
+      (九楼, 第二天一早) never triggers it;
+    * a ZH ``possessive`` verdict is kept only with genuine
+      pronoun/proper-name + ``的`` structure — attributive ``的``
+      (浓云低垂的天空) is downgraded to plain ``bare``;
     * an EN span led by a quantificational determiner is ``other`` +
       ``quantifier``, never a bare singular.
 
-    ``quantifier`` joins ``non_nominal`` as a hybrid-layer detail
-    extension; the frozen codebooks in the GLM and deterministic
+    ``quantifier`` and ``non_nominal`` are hybrid-layer detail
+    diagnostics only; the frozen codebooks in the GLM and deterministic
     modules stay untouched.
     """
     if not tokens:
@@ -320,9 +344,15 @@ def recompute_form(tokens: list[Token], lang: str) -> tuple[str, str]:
     if realization_type(tokens) == "verbal":
         return "other", "non_nominal"
     paper, detail = english_form(tokens) if lang == "en" else chinese_form(tokens)
-    if lang == "zh" and paper == "bare":
-        if _zh_has_numeral_classifier(tokens) or any(t.upos in ("NUM", "CD") for t in tokens):
+    if lang == "zh":
+        if _zh_has_numeral_classifier(tokens):
             return "other", "numeral_classifier"
+        # the frozen rule fires on any NUM + clf-tagged pair; a
+        # non-counting numeral (第-ordinal) is not that construction
+        if detail == "numeral_classifier":
+            return "bare", ""
+        if detail == "possessive" and not _zh_has_genuine_possessive(tokens):
+            return "bare", ""
     if lang == "en" and paper == "bare_singular":
         stripped = [t for t in tokens if t.upos not in ("ADP", "PUNCT", "SYM")]
         if stripped and stripped[0].form.lower() in _EN_QUANTIFIER_DETERMINERS:
@@ -568,19 +598,424 @@ def build_hybrid_row(
     return {c: row.get(c, "") for c in HYBRID_COLUMNS}
 
 
+# --- simplified research-facing eligibility gate ---------------------------------------
+#
+# The core Translation Mining question per target side is only: is there
+# an identifiable nominal/referential expression in the reliable
+# translation locus usable as the counterpart for surface-form
+# comparison? Three states, no translation-shift ontology, and never a
+# final ``omitted`` claim:
+
+ELIGIBILITY_STATES = (
+    "comparable_counterpart",  # nominal/referential counterpart identified
+    "no_comparable_nominal_counterpart",  # reliable locus, none identifiable
+    "unresolved",  # evidence insufficient; never a linguistic absence
+)
+ROW_ELIGIBILITY_STATES = (
+    "core_tuple_eligible",
+    "excluded_no_comparable_counterpart",
+    "unresolved",
+)
+
+# Constituent recovery runs over the same frozen nominal deprel sets as
+# candidate generation (single source of truth), but without
+# generation's width cap: GLM's span already names the referent, so
+# recovery widens to its full nominal expression.
+from hp_corpus.constituent_candidates import (  # noqa: E402
+    _EN_NOMINAL_DEPRELS,
+    _ZH_NOMINAL_DEPRELS,
+)
+
+# Leftward attributive extension stops at clause-ish material; ``、``
+# (NP-internal enumerator) is allowed through, sentence-level ``，`` is
+# not, and a pronoun is allowed only when it binds ``的`` (possessive).
+_EXTENSION_STOP_UPOS = frozenset({"VERB", "AUX", "ADV", "ADP", "DET", "CCONJ"})
+_MAX_EXTENSION_TOKENS = 8
+
+
+def _head_index(tok: Token) -> int:
+    try:
+        return int(tok.head)
+    except ValueError:
+        return -1
+
+
+def _block_tokens_with_positions(
+    block_text: str, block_tokens: list[Token]
+) -> list[tuple[int, int, Token]] | None:
+    """Char (start, end) of each token inside its block text, located
+    sequentially; ``None`` when a token cannot be located (fail-closed)."""
+    out = []
+    cursor = 0
+    for tok in block_tokens:
+        m = re.search(rf"\s*{re.escape(tok.form)}", block_text[cursor:])
+        if m is None:
+            return None
+        end = cursor + m.end()
+        out.append((end - len(tok.form), end, tok))
+        cursor = end
+    return out
+
+
+def nominal_head_token(tokens: list[Token]) -> Token | None:
+    """The nominal/referential head of a token sequence: the first
+    NOUN/PROPN among the content tokens, or the leading pronoun of a
+    pronoun-only span. ``None`` when the sequence has no nominal head
+    (verbal / adverbial / purely functional material)."""
+    core = [t for t in tokens if t.upos not in _REALIZATION_SKIP_UPOS]
+    for t in core:
+        if t.upos in ("NOUN", "PROPN"):
+            return t
+    if core and core[0].upos == "PRON":
+        return core[0]
+    return None
+
+
+# Nouns attached to another noun inside the anchor by a dependent
+# deprel are modifiers (living room's "living", 一大批's "大批"), not
+# the constituent head.
+_DEPENDENT_NOMINAL_DEPRELS = frozenset(
+    {"compound", "amod", "nmod", "nummod", "clf", "det", "flat", "flat:name", "appos"}
+)
+
+
+def _select_head_local(
+    positions: list[tuple[int, int, Token]], anchor_local: set[int]
+) -> int | None:
+    """Block-local index of the anchor's constituent head: the last
+    NOUN/PROPN that is not a dependent of another anchor noun (both
+    languages are right-headed at the NP core); the last nominal as
+    fallback. ``None`` when the anchor has no nominal at all."""
+    nominals = [i for i in sorted(anchor_local) if positions[i][2].upos in ("NOUN", "PROPN")]
+    if not nominals:
+        return None
+    heads = [
+        i
+        for i in nominals
+        if not (
+            positions[i][2].deprel in _DEPENDENT_NOMINAL_DEPRELS
+            and any(_head_index(positions[i][2]) == j + 1 for j in nominals if j != i)
+        )
+    ]
+    return (heads or nominals)[-1]
+
+
+def recover_containing_constituent(
+    mapping: SpanMapping, layout: SideLayout, lang: str
+) -> SpanMapping:
+    """Expand an anchor mapping to the full containing nominal
+    constituent. The GLM span is a semantic anchor; classification must
+    see the whole expression (determiners, numeral/classifier chains,
+    possessives, demonstratives).
+
+    Stage 1 (parse-faithful): head + direct nominal dependents per the
+    frozen per-language deprel sets (ZH numeral dependents pull their
+    classifiers in), edges shrunk off adpositions/punctuation.
+
+    Stage 2 (attributive extension): the ZH parser routinely fails to
+    attach modifiers to the head (一张…的床上 parses with the modifiers
+    as siblings), so the span extends leftward over attributive
+    material terminated by 的, bounded by clause-level tokens and a
+    width cap. ``、`` passes; sentence ``，`` does not.
+    """
+    block_tokens = [
+        t for i, t in enumerate(layout.tokens) if layout.token_block[i] == mapping.block_slot
+    ]
+    positions = _block_tokens_with_positions(layout.block_texts[mapping.block_slot], block_tokens)
+    if positions is None:
+        return mapping
+    anchor_local = {i for i, (_, _, t) in enumerate(positions) if t in set(mapping.tokens)}
+    head_local = _select_head_local(positions, anchor_local)
+    if head_local is None:
+        return mapping
+
+    nominal = _ZH_NOMINAL_DEPRELS if lang == "zh" else _EN_NOMINAL_DEPRELS
+    head_one_based = head_local + 1
+    include = {head_local}
+    for i, (_, _, tok) in enumerate(positions):
+        if tok.deprel in nominal and _head_index(tok) == head_one_based:
+            include.add(i)
+            if lang == "zh" and tok.deprel == "nummod":
+                for j, (_, _, tok2) in enumerate(positions):
+                    if tok2.deprel == "clf" and _head_index(tok2) == i + 1:
+                        include.add(j)
+    lo, hi = min(include), max(include)
+
+    if lang == "zh":
+        extended = 0
+        while lo > 0 and extended < _MAX_EXTENSION_TOKENS:
+            cand = positions[lo - 1][2]
+            if cand.upos in _EXTENSION_STOP_UPOS:
+                if not (cand.upos == "PRON" and positions[lo][2].form == "的"):
+                    break
+            elif cand.upos in ("PUNCT", "SYM") and cand.form != "、":
+                break
+            elif cand.upos in ("PART", "SCONJ") and cand.form != "的":
+                break
+            lo -= 1
+            extended += 1
+    while lo < hi and positions[lo][2].upos in ("ADP", "PUNCT", "SYM"):
+        lo += 1
+    while hi > lo and positions[hi][2].upos in ("ADP", "PUNCT", "SYM"):
+        hi -= 1
+
+    span_text = _exact_substring(
+        layout.block_texts[mapping.block_slot],
+        [positions[i][2].form for i in range(lo, hi + 1)],
+    )
+    if span_text is None or not span_text.strip():
+        return mapping
+    start = layout.block_texts[mapping.block_slot].find(span_text)
+    return SpanMapping(
+        block_slot=mapping.block_slot,
+        start_char=start,
+        end_char=start + len(span_text),
+        tokens=[positions[i][2] for i in range(lo, hi + 1)],
+    )
+
+
+@dataclass
+class CandidateRef:
+    """A saved candidate-dump entry the eligibility gate can fall back
+    to when the GLM anchor itself is not nominal."""
+
+    span: str
+    category: str  # noun | pronoun | proper_name
+    eflomal: bool = False
+    ctx_rank: int | None = None
+
+
+def best_overlapping_candidate(
+    anchor_span: str, candidates: list[CandidateRef]
+) -> CandidateRef | None:
+    """Best nominal/referential candidate overlapping the anchor span
+    (containment in either direction); eflomal-supported first, then
+    contextual rank."""
+    hits = [
+        c
+        for c in candidates
+        if c.category in ("noun", "pronoun", "proper_name")
+        and _relation(anchor_span, c.span) in ("exact", "containment")
+    ]
+    if not hits:
+        return None
+    return min(
+        hits,
+        key=lambda c: (not c.eflomal, c.ctx_rank if c.ctx_rank is not None else 10**9),
+    )
+
+
+@dataclass
+class EligibilityDecision:
+    eligibility: str
+    counterpart: str = ""
+    paper_form: str = ""
+    detail_form: str = ""
+    evidence: str = ""
+    requires_review: bool = True
+
+
+def mapping_span_text(mapping: SpanMapping, layout: SideLayout | None) -> str:
+    """The recovered span's verbatim text inside its block."""
+    if layout is None or mapping.end_char <= mapping.start_char:
+        return ""
+    return layout.block_texts[mapping.block_slot][mapping.start_char : mapping.end_char]
+
+
+def _classify_span_on_layout(
+    span: str, layout: SideLayout | None, lang: str
+) -> tuple[str, str, str]:
+    """Map a span in the locus layout, recover its constituent, and
+    recompute the observable form. Empty values when unmappable."""
+    if layout is None:
+        return "", "", ""
+    mapping = map_span_to_tokens(layout, span)
+    if mapping is None:
+        return "", "", ""
+    rec = recover_containing_constituent(mapping, layout, lang)
+    paper, detail = recompute_form(rec.tokens, lang)
+    return mapping_span_text(rec, layout), paper, detail
+
+
+def eligibility_side(
+    glm: GlmSide,
+    local: LocalSide,
+    facts: SideFacts,
+    candidates: list[CandidateRef],
+    lang: str,
+) -> EligibilityDecision:
+    """The simplified three-state gate for one target side.
+
+    GLM's span (when present) is a semantic anchor: map it to the locus
+    parse, and if it touches a nominal/referential head, the full
+    containing constituent is recovered and classified
+    (``comparable_counterpart``). A non-nominal anchor (verbalized,
+    restructured, or mistagged into VERB/PART by the parser) falls back
+    to the saved candidate set: a defensible overlapping nominal
+    candidate makes the side comparable; none on a reliable locus makes
+    it ``no_comparable_nominal_counterpart`` (NOT ``omitted`` — that is
+    a stronger linguistic claim than this workflow makes); a blank GLM
+    proposal defers entirely to the local routing.
+    """
+    if facts.locus == "retrieval_not_aligned":
+        return EligibilityDecision("unresolved", evidence="unreliable_locus")
+
+    if glm.proposes_span and not facts.span_in_context:
+        return EligibilityDecision("unresolved", evidence="glm_span_not_in_context")
+
+    if glm.proposes_span:
+        if facts.mapping is None:
+            # outside the strict DP anchor (scope conflict) or
+            # unmappable: the proposal cannot be structurally verified
+            # in the reliable locus
+            ev = (
+                "anchor_outside_aligned_locus" if facts.locus == "reliable" else "anchor_unmappable"
+            )
+            return EligibilityDecision("unresolved", evidence=ev)
+        head = nominal_head_token(facts.mapping.tokens)
+        if head is not None:
+            rec = recover_containing_constituent(facts.mapping, facts.layout, lang)
+            paper, detail = recompute_form(rec.tokens, lang)
+            rec_text = mapping_span_text(rec, facts.layout) or glm.span
+            agree = (
+                local.has_overt_choice
+                and _relation(rec_text, local.chosen_span) in ("exact", "containment")
+                and local.evidence in ("both", "contextual_supported")
+            )
+            return EligibilityDecision(
+                "comparable_counterpart",
+                counterpart=rec_text,
+                paper_form=paper,
+                detail_form=detail,
+                evidence=(
+                    "anchor_nominal_local_agreement" if agree else "anchor_nominal_recovered"
+                ),
+                requires_review=not agree,
+            )
+        cand = best_overlapping_candidate(glm.span, candidates)
+        if cand is not None and facts.layout is not None:
+            span, paper, detail = _classify_span_on_layout(cand.span, facts.layout, lang)
+            if span:
+                return EligibilityDecision(
+                    "comparable_counterpart",
+                    counterpart=span,
+                    paper_form=paper,
+                    detail_form=detail,
+                    evidence="anchor_non_nominal_candidate_overlap",
+                )
+        if facts.locus == "reliable":
+            return EligibilityDecision(
+                "no_comparable_nominal_counterpart",
+                evidence="anchor_non_nominal_no_candidate",
+            )
+        return EligibilityDecision("unresolved", evidence="anchor_non_nominal_no_anchor")
+
+    # GLM blank (omission claim or not_aligned): defer to local routing
+    if local.state in ("nominal_counterpart", "alternate_referential_form") and (
+        local.has_overt_choice
+    ):
+        span, paper, detail = _classify_span_on_layout(local.chosen_span, facts.layout, lang)
+        return EligibilityDecision(
+            "comparable_counterpart",
+            counterpart=span or local.chosen_span,
+            paper_form=paper or local.form[0],
+            detail_form=detail or local.form[1],
+            evidence="blank_glm_local_candidate",
+            requires_review=local.evidence not in ("both", "contextual_supported"),
+        )
+    if local.state == "non_nominal_realization":
+        return EligibilityDecision(
+            "no_comparable_nominal_counterpart",
+            evidence="blank_glm_local_verbal_realization",
+        )
+    if local.state == "no_overt_candidate":
+        return EligibilityDecision(
+            "no_comparable_nominal_counterpart",
+            evidence="blank_glm_local_absence",
+        )
+    return EligibilityDecision("unresolved", evidence="blank_glm_local_ambiguous")
+
+
+ELIGIBILITY_COLUMNS: tuple[str, ...] = (
+    MACHINE_TUPLE_COLUMNS
+    + tuple(
+        f"elig_{side}_{col}"
+        for side in ("en", "zh")
+        for col in (
+            "state",
+            "counterpart",
+            "paper_form",
+            "detail_form",
+            "evidence",
+            "requires_review",
+        )
+    )
+    + ("row_eligibility",)
+)
+
+
+def build_eligibility_row(
+    glm_row: dict[str, str],
+    decisions: dict[str, EligibilityDecision],
+    row_eligibility: str,
+) -> dict[str, str]:
+    """One eligibility artifact row: the saved GLM row passes through
+    verbatim; the per-side eligibility decision and the row-level
+    three-way eligibility live in ``elig_*`` columns."""
+    row = dict(glm_row)
+    for side in ("en", "zh"):
+        dec = decisions.get(side)
+        if dec is None:
+            continue
+        row[f"elig_{side}_state"] = dec.eligibility
+        row[f"elig_{side}_counterpart"] = dec.counterpart
+        row[f"elig_{side}_paper_form"] = dec.paper_form
+        row[f"elig_{side}_detail_form"] = dec.detail_form
+        row[f"elig_{side}_evidence"] = dec.evidence
+        row[f"elig_{side}_requires_review"] = "yes" if dec.requires_review else "no"
+    row["row_eligibility"] = row_eligibility
+    return {c: row.get(c, "") for c in ELIGIBILITY_COLUMNS}
+
+
+def row_eligibility_for(de_valid: bool, decisions: dict[str, EligibilityDecision]) -> str:
+    """Three-way row eligibility: any unresolved side → unresolved
+    (never a linguistic absence); else any non-comparable side →
+    excluded_no_comparable_counterpart; else (DE valid and both target
+    sides comparable) → core_tuple_eligible."""
+    if not de_valid:
+        return "unresolved"
+    states = [d.eligibility for d in decisions.values()]
+    if any(s == "unresolved" for s in states):
+        return "unresolved"
+    if any(s == "no_comparable_nominal_counterpart" for s in states):
+        return "excluded_no_comparable_counterpart"
+    return "core_tuple_eligible"
+
+
 __all__ = [
     "HYBRID_METHOD_ID",
     "HYBRID_ROUTES",
     "REALIZATION_TYPES",
     "HYBRID_COLUMNS",
+    "ELIGIBILITY_STATES",
+    "ROW_ELIGIBILITY_STATES",
+    "ELIGIBILITY_COLUMNS",
     "GlmSide",
     "LocalSide",
     "SpanMapping",
     "SideFacts",
     "HybridDecision",
+    "EligibilityDecision",
+    "CandidateRef",
     "map_span_to_tokens",
     "realization_type",
     "recompute_form",
+    "nominal_head_token",
+    "recover_containing_constituent",
+    "best_overlapping_candidate",
+    "eligibility_side",
+    "row_eligibility_for",
     "arbitrate_side",
     "build_hybrid_row",
+    "build_eligibility_row",
 ]
