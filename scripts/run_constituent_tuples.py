@@ -50,10 +50,13 @@ from hp_corpus.constituent_candidates import (  # noqa: E402
     CONSTITUENT_METHOD_ID,
     RouteResult,
     build_constituent_row,
+    classify_locus,
     eflomal_supported_indices,
     form_for_candidate,
     generate_candidates,
+    route_no_anchor,
     route_side,
+    verbal_realization_evidence,
 )
 from hp_corpus.contextual_similarity import (  # noqa: E402
     ContextualSimilarity,
@@ -67,8 +70,8 @@ from hp_corpus.deterministic_tuples import (  # noqa: E402
 EXIT_OK = 0
 EXIT_INPUT_ERROR = 2
 
-METHOD_PARAMS_ID = "eflomal-frozen+stanza-parses+labse-cpu-v1"
-CHOSEN_STATES = ("nominal_counterpart", "non_nominal_counterpart")
+METHOD_PARAMS_ID = "eflomal-frozen+stanza-parses+labse-cpu-v2"
+CHOSEN_STATES = ("nominal_counterpart", "alternate_referential_form")
 
 
 def _fail(rule: str, message: str) -> int:
@@ -134,6 +137,10 @@ def cmd_annotate(args: argparse.Namespace) -> int:
     state_counter = {s: Counter() for s in ("en", "zh")}
     evidence_counter = {s: Counter() for s in ("en", "zh")}
     reason_counter: Counter = Counter()
+    # locus situations at classification time — a no-anchor side whose
+    # candidates stayed unclear routes to unresolved/no_overt_candidate
+    # per spec, but the situation count is reported separately
+    locus_counter = {s: Counter() for s in ("en", "zh")}
 
     for row in master:
         dp = row["datapoint_id"]
@@ -146,21 +153,7 @@ def cmd_annotate(args: argparse.Namespace) -> int:
         for side, pair, lang in (("en", "de_en", "en"), ("zh", "de_zh", "zh")):
             anchor = json.loads(row.get(f"{side}_sentence_ids") or "[]")
             provenance = (row.get(f"{side}_context_provenance") or "").strip()
-            # Unreliable locus = no anchor at all, or the machine could
-            # not retrieve the side (manual_review — the reviewed true
-            # locus sits outside the machine window). neighbor_fallback
-            # sides are bracket contexts whose locus may well be present
-            # (the recovered regression cases): proceed, and let the
-            # two-signal agreement decide.
-            locus_reliable = bool(anchor) and provenance != "manual_review"
-            if not anchor:
-                routed[side] = RouteResult("not_aligned", reason="no_anchor")
-                counts[side] = 0
-                continue
-            if not locus_reliable:
-                routed[side] = RouteResult("not_aligned", reason="unreliable_locus")
-                counts[side] = 0
-                continue
+            context_ids = json.loads(row.get(f"{side}_context_ids") or "[]")
             rec = next(
                 (
                     r
@@ -168,11 +161,63 @@ def cmd_annotate(args: argparse.Namespace) -> int:
                     if row["de_source_segment_id"] in r["de_segments"]
                 ),
                 None,
-            )
-            if rec is None:
-                routed[side] = RouteResult("unresolved", reason="anchor_record_not_found")
+            ) if anchor else None
+            locus = classify_locus(anchor, provenance, rec is not None, context_ids)
+            locus_counter[side][locus] += 1
+            if locus == "retrieval_not_aligned":
+                routed[side] = RouteResult(
+                    "retrieval_not_aligned",
+                    reason="unreliable_locus" if provenance == "manual_review" else "no_context",
+                )
                 counts[side] = 0
-                reason_counter[f"{side}.anchor_record_not_found"] += 1
+                continue
+            if locus == "no_anchor_context_available":
+                # No strict DP record → eflomal evidence structurally
+                # unavailable. The bounded production retrieval context
+                # stays inspectable: parse candidates over it, ranked by
+                # the LaBSE contextual candidate similarity only —
+                # single-signal, low-confidence fallback, never
+                # auto-promoted. The context is NOT widened.
+                de_layout, de_vecs = layout_with_vectors(
+                    "de", [row["de_source_segment_id"]]
+                )
+                tgt_layout, tgt_vecs = layout_with_vectors(lang, context_ids)
+                pp = det._pp_slice(
+                    de_layout,
+                    row["de_parse_block_id"],
+                    int(row["de_token_start"]),
+                    int(row["de_token_end"]),
+                )
+                if pp is None or not tgt_layout.tokens:
+                    routed[side] = RouteResult("unresolved", reason="pp_or_context_missing")
+                    counts[side] = 0
+                    reason_counter[f"{side}.pp_or_context_missing"] += 1
+                    continue
+                candidates = generate_candidates(tgt_layout, lang)
+                counts[side] = len(candidates)
+                contextual = rank_candidates(de_vecs, pp, tgt_vecs, candidates)
+                result = route_no_anchor(candidates, contextual)
+                routed[side] = result
+                if result.chosen is not None:
+                    forms[side] = form_for_candidate(result.chosen, tgt_layout, lang)
+                ranked = sorted(contextual.items(), key=lambda kv: -kv[1])
+                rank_of = {idx: i + 1 for i, (idx, _) in enumerate(ranked)}
+                dump[side] = {
+                    "state": result.state,
+                    "evidence": result.evidence,
+                    "contextual_margin": result.contextual_margin,
+                    "candidates": [
+                        {
+                            "span": c.span_text,
+                            "category": c.category,
+                            "eflomal": None,  # structurally unavailable
+                            "ctx_sim": contextual.get(i),
+                            "ctx_rank": rank_of.get(i),
+                        }
+                        for i, c in enumerate(candidates)
+                    ],
+                }
+                reason_counter[f"{side}.{result.state}"] += 1
                 continue
             de_layout, de_vecs = layout_with_vectors("de", rec["de_segments"])
             tgt_layout, tgt_vecs = layout_with_vectors(lang, rec["tgt_segments"])
@@ -193,7 +238,16 @@ def cmd_annotate(args: argparse.Namespace) -> int:
                 candidates, pp, set(map(tuple, rec["fwd"])), set(map(tuple, rec["rev"]))
             )
             contextual = rank_candidates(de_vecs, pp, tgt_vecs, candidates)
-            result = route_side(candidates, supported, contextual, locus_reliable=True)
+            verbal_only = verbal_realization_evidence(
+                pp, set(map(tuple, rec["fwd"])), set(map(tuple, rec["rev"])), tgt_layout
+            )
+            result = route_side(
+                candidates,
+                supported,
+                contextual,
+                locus_reliable=True,
+                verbal_links_only=verbal_only,
+            )
             routed[side] = result
             if result.chosen is not None:
                 forms[side] = form_for_candidate(result.chosen, tgt_layout, lang)
@@ -218,7 +272,7 @@ def cmd_annotate(args: argparse.Namespace) -> int:
                 reason_counter[f"{side}.{result.state}"] += 1
 
         for s in ("en", "zh"):
-            state_counter[s][routed[s].state if routed.get(s) else "not_aligned"] += 1
+            state_counter[s][routed[s].state if routed.get(s) else "retrieval_not_aligned"] += 1
             evidence_counter[s][routed[s].evidence if routed.get(s) else "none"] += 1
         machine_rows.append(
             build_constituent_row(
@@ -254,6 +308,7 @@ def cmd_annotate(args: argparse.Namespace) -> int:
         "evidence": {k: dict(sorted(v.items())) for k, v in evidence_counter.items()},
         "forms": {k: dict(sorted(v.items())) for k, v in form_agg.items()},
         "non_chosen_reasons": dict(sorted(reason_counter.items())),
+        "locus_situations": {k: dict(sorted(v.items())) for k, v in locus_counter.items()},
     }
     report_path = args.output.with_name(args.output.stem + "_run_report.json")
     det.write_json(report_path, report)

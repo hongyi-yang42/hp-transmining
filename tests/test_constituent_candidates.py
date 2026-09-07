@@ -22,10 +22,13 @@ from hp_corpus.constituent_candidates import (
     CONTEXTUAL_MARGIN,
     RouteResult,
     build_constituent_row,
+    classify_locus,
     eflomal_supported_indices,
     generate_candidates,
     nominal_expression_indices,
+    route_no_anchor,
     route_side,
+    verbal_realization_evidence,
 )
 from hp_corpus.contextual_similarity import cosine, mean_vector, rank_candidates
 from hp_corpus.deterministic_tuples import (
@@ -254,7 +257,7 @@ class TestRouting:
         assert result.evidence == "both"
         assert result.chosen is cands[idx]
 
-    def test_eflomal_only_when_contextual_prefers_other(self):
+    def test_disagreement_when_contextual_prefers_other(self):
         cands, _ = _cands_en()
         idx = next(i for i, c in enumerate(cands) if c.head_global == 5)
         other = next(i for i, c in enumerate(cands) if c.head_global == 0)
@@ -262,16 +265,16 @@ class TestRouting:
         sims[other] = 0.80
         result = route_side(cands, {idx}, sims, locus_reliable=True)
         assert result.state == "nominal_counterpart"
-        assert result.evidence == "eflomal_only"
+        assert result.evidence == "disagreement"
 
-    def test_contextual_only_with_clear_margin_above_floor(self):
+    def test_contextual_supported_with_clear_margin_above_floor(self):
         cands, _ = _cands_en()
         idx = next(i for i, c in enumerate(cands) if c.head_global == 5)
         sims = {i: 0.10 for i in range(len(cands))}
         sims[idx] = 0.80
         result = route_side(cands, set(), sims, locus_reliable=True)
         assert result.state == "nominal_counterpart"
-        assert result.evidence == "contextual_only"
+        assert result.evidence == "contextual_supported"
 
     def test_disagreement_with_multiple_supported_is_ambiguous(self):
         # three candidates: contextual prefers the one eflomal does NOT
@@ -301,39 +304,39 @@ class TestRouting:
         result = route_side(cands, set(), sims, locus_reliable=True)
         assert result.state == "ambiguous_multiple"  # NOT omission_candidate
 
-    def test_omission_candidate_requires_positive_absence(self):
+    def test_no_overt_candidate_requires_positive_absence(self):
         cands, _ = _cands_en()
         sims = {i: 0.20 for i in range(len(cands))}  # all below floor
         result = route_side(cands, set(), sims, locus_reliable=True)
-        assert result.state == "omission_candidate"
+        assert result.state == "no_overt_candidate"
 
-    def test_omission_candidate_is_not_final_omitted(self):
+    def test_no_overt_candidate_is_not_final_omitted(self):
         cands, _ = _cands_en()
         sims = {i: 0.20 for i in range(len(cands))}
         result = route_side(cands, set(), sims, locus_reliable=True)
-        assert result.state == "omission_candidate"
+        assert result.state == "no_overt_candidate"
         assert result.state != "omitted"
         assert result.chosen is None
 
-    def test_no_candidates_on_reliable_locus_is_omission_candidate(self):
+    def test_no_candidates_on_reliable_locus_is_no_overt_candidate(self):
         result = route_side([], set(), {}, locus_reliable=True)
-        assert result.state == "omission_candidate"
+        assert result.state == "no_overt_candidate"
 
-    def test_unreliable_locus_is_not_aligned(self):
+    def test_unreliable_locus_is_retrieval_not_aligned(self):
         cands, _ = _cands_en()
         sims = {i: 0.8 for i in range(len(cands))}
         result = route_side(cands, set(), sims, locus_reliable=False)
-        assert result.state == "not_aligned"
+        assert result.state == "retrieval_not_aligned"
 
-    def test_pronoun_realization_routes_non_nominal(self):
+    def test_pronoun_realization_routes_alternate_referential(self):
         cands, _ = _cands_en()
         idx = next(i for i, c in enumerate(cands) if c.head_global == 0)
         sims = {i: 0.10 for i in range(len(cands))}
         sims[idx] = 0.90
         result = route_side(cands, {idx}, sims, locus_reliable=True)
-        assert result.state == "non_nominal_counterpart"
+        assert result.state == "alternate_referential_form"
 
-    def test_proper_name_realization_routes_non_nominal(self):
+    def test_proper_name_realization_routes_alternate_referential(self):
         toks = [
             _tok("at", "ADP", "3", "case"),
             _tok("Privet", "PROPN", "3", "compound"),
@@ -345,7 +348,7 @@ class TestRouting:
         sims = {i: 0.10 for i in range(len(cands))}
         sims[idx] = 0.90
         result = route_side(cands, {idx}, sims, locus_reliable=True)
-        assert result.state == "non_nominal_counterpart"
+        assert result.state == "alternate_referential_form"
 
     def test_routing_is_reproducible(self):
         cands, _ = _cands_en()
@@ -397,7 +400,7 @@ class TestArtifactRow:
         assert row["machine_en_paper_form"] == "demonstrative"
         assert row["machine_en_evidence"] == "both"
 
-    def test_omission_candidate_row_has_blank_form_not_omitted(self):
+    def test_no_overt_candidate_row_has_blank_form_not_omitted(self):
         master = {
             "datapoint_id": "dp2", "chapter": "1", "de_form": "contracted",
             "de_pp_surface": "x", "de_head_lemma": "x", "de_sentence_text": "x.",
@@ -407,15 +410,15 @@ class TestArtifactRow:
         }
         row = build_constituent_row(
             master,
-            {"en": RouteResult("omission_candidate"), "zh": RouteResult("not_aligned")},
+            {"en": RouteResult("no_overt_candidate"), "zh": RouteResult("retrieval_not_aligned")},
             {"en": ("", ""), "zh": ("", "")},
             {"en": 3, "zh": 0},
             pack_stratum="routine", method_params_id="x",
         )
-        assert row["machine_en_status"] == "omission_candidate"
+        assert row["machine_en_status"] == "no_overt_candidate"
         assert row["machine_en_paper_form"] == ""
         assert row["machine_en_detail_form"] == ""
-        assert row["machine_zh_status"] == "not_aligned"
+        assert row["machine_zh_status"] == "retrieval_not_aligned"
 
     def test_machine_and_human_columns_still_disjoint(self):
         assert set(CONSTITUENT_COLUMNS).isdisjoint(ANNOTATOR_COLUMNS)
@@ -469,3 +472,125 @@ class TestProductionPathUntouched:
         rows = build.build_csv_rows([master])
         for col in ANNOTATOR_COLUMNS:
             assert rows[0][col] == ""
+
+
+# --- ontology cleanup: referential categories, verbal realization, locus split ---
+
+
+class TestOntologyCleanup:
+    def test_pronoun_not_labeled_non_nominal(self):
+        cands, _ = _cands_en()
+        idx = next(i for i, c in enumerate(cands) if c.head_global == 0)  # "He"
+        sims = {i: 0.10 for i in range(len(cands))}
+        sims[idx] = 0.90
+        result = route_side(cands, {idx}, sims, locus_reliable=True)
+        assert result.state == "alternate_referential_form"
+        assert result.state != "non_nominal_counterpart"
+
+    def test_proper_name_not_labeled_non_nominal(self):
+        toks = [
+            _tok("at", "ADP", "3", "case"),
+            _tok("Privet", "PROPN", "3", "compound"),
+            _tok("Drive", "PROPN", "0", "root"),
+        ]
+        layout = _layout(toks, "at Privet Drive")
+        cands = generate_candidates(layout, "en")
+        idx = next(i for i, c in enumerate(cands) if c.category == "proper_name")
+        sims = {i: 0.10 for i in range(len(cands))}
+        sims[idx] = 0.90
+        result = route_side(cands, {idx}, sims, locus_reliable=True)
+        assert result.state == "alternate_referential_form"
+
+    def test_verbal_realization_evidence_requires_all_verb_links(self):
+        # consensus links from the PP land on VERB tokens only
+        layout = _layout(
+            [_tok("He", "PRON", "2", "nsubj"), _tok("ran", "VERB", "0", "root")],
+            "He ran",
+        )
+        assert verbal_realization_evidence(range(0, 1), {(0, 1)}, {(0, 1)}, layout)
+        # links landing on a noun are not verbal evidence
+        layout2 = _layout([_tok("cupboard", "NOUN", "0", "root")], "cupboard")
+        assert not verbal_realization_evidence(range(0, 1), {(0, 0)}, {(0, 0)}, layout2)
+        # no links at all: not positive evidence
+        assert not verbal_realization_evidence(range(0, 1), set(), set(), layout)
+
+    def test_verbal_realization_state_distinct_from_alternate(self):
+        cands, _ = _cands_en()
+        sims = {i: 0.20 for i in range(len(cands))}  # nothing above floor
+        result = route_side(
+            cands, set(), sims, locus_reliable=True, verbal_links_only=True
+        )
+        assert result.state == "non_nominal_realization"
+        assert result.state != "alternate_referential_form"
+
+    def test_verbal_links_vs_clear_contextual_noun_is_ambiguous(self):
+        cands, _ = _cands_en()
+        idx = next(i for i, c in enumerate(cands) if c.head_global == 5)
+        sims = {i: 0.10 for i in range(len(cands))}
+        sims[idx] = 0.80  # clear contextual preference for a noun
+        result = route_side(
+            cands, set(), sims, locus_reliable=True, verbal_links_only=True
+        )
+        assert result.state == "ambiguous_multiple"
+
+
+class TestLocusClassification:
+    def test_manual_review_is_retrieval_not_aligned(self):
+        assert classify_locus(["a"], "manual_review", True, ["c"]) == "retrieval_not_aligned"
+
+    def test_no_anchor_with_context_is_no_anchor_context_available(self):
+        assert classify_locus([], "neighbor_fallback", False, ["c1", "c2"]) == (
+            "no_anchor_context_available"
+        )
+
+    def test_record_missing_with_context_is_no_anchor_context_available(self):
+        assert classify_locus(["a"], "anchor_window", False, ["c"]) == (
+            "no_anchor_context_available"
+        )
+
+    def test_no_anchor_no_context_is_retrieval_not_aligned(self):
+        assert classify_locus([], "neighbor_fallback", False, []) == "retrieval_not_aligned"
+
+    def test_strict_record_present_is_reliable(self):
+        assert classify_locus(["a"], "anchor_window", True, ["c"]) == "reliable"
+        assert classify_locus(["a"], "neighbor_fallback", True, ["c"]) == "reliable"
+
+
+class TestNoAnchorRouting:
+    def test_clear_contextual_choice_is_low_confidence_fallback(self):
+        cands, _ = _cands_en()
+        idx = next(i for i, c in enumerate(cands) if c.head_global == 5)
+        sims = {i: 0.10 for i in range(len(cands))}
+        sims[idx] = 0.80
+        result = route_no_anchor(cands, sims)
+        assert result.state == "no_anchor_context_available"
+        assert result.chosen is cands[idx]
+        assert result.evidence == "contextual_no_anchor"
+        # never auto-promoted to a high-confidence state/evidence
+        assert result.evidence != "both"
+        assert result.state not in ("nominal_counterpart", "alternate_referential_form")
+
+    def test_no_anchor_unchosen_when_no_clear_candidate(self):
+        cands, _ = _cands_en()
+        sims = {i: 0.55 for i in range(len(cands))}  # plausible, unclear
+        result = route_no_anchor(cands, sims)
+        assert result.state == "unresolved"
+        assert result.chosen is None
+
+    def test_no_anchor_all_below_floor_is_no_overt_candidate(self):
+        cands, _ = _cands_en()
+        sims = {i: 0.20 for i in range(len(cands))}
+        result = route_no_anchor(cands, sims)
+        assert result.state == "no_overt_candidate"
+
+    def test_no_anchor_no_candidates_keeps_situation_state(self):
+        result = route_no_anchor([], {})
+        assert result.state == "no_anchor_context_available"
+        assert result.chosen is None
+
+    def test_no_strict_anchor_is_not_retrieval_not_aligned(self):
+        # the distinction the cleanup exists for: a missing DP anchor
+        # with a bounded context must never be labeled as bad retrieval
+        locus = classify_locus([], "neighbor_fallback", False, ["c1"])
+        assert locus == "no_anchor_context_available"
+        assert locus != "retrieval_not_aligned"

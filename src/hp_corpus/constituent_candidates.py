@@ -29,17 +29,28 @@ Because candidates come from the parse, the correct constituent is
 still in play when eflomal fails to link the right noun.
 
 Routing ends in a finite state space per language side:
-``nominal_counterpart``, ``non_nominal_counterpart`` (pronoun /
-proper-name realization), ``ambiguous_multiple``, ``unresolved``,
-``omission_candidate`` (locus reliable, nothing plausible — explicitly
-NOT a final ``omitted``; that stays a later LLM/human adjudication),
-``not_aligned`` (unreliable/absent retrieval locus). "No word link" is
-never converted into omission, and unreliable retrieval is never
-converted into omission.
+``nominal_counterpart``; ``alternate_referential_form`` (pronoun /
+proper-name realization — still a nominal-category referential
+expression, recorded via detail, never mislabeled as non-nominal);
+``non_nominal_realization`` (only on positive evidence that the PP was
+realized verbally/clausally — consensus links landing exclusively on
+verb tokens); ``ambiguous_multiple``; ``unresolved``;
+``no_overt_candidate`` (machine-observable absence of a defensible
+overt candidate — explicitly NOT ``omitted``; only later human/LLM
+adjudication may convert it to ``omitted`` / ``paraphrased`` /
+``aligner_miss``); ``retrieval_not_aligned`` (the supplied context
+itself is unreliable as the translation locus, e.g. a manual_review
+side whose true locus lies outside it); ``no_anchor_context_available``
+(the strict DP alignment record is absent so eflomal evidence cannot
+be computed, BUT the bounded production retrieval context exists and
+remains inspectable — candidates from it are contextual-only,
+low-confidence fallback material). "No word link" is never converted
+into omission, and a missing strict anchor is never conflated with bad
+retrieval.
 
-Operational pilot rules (frozen constants, not tuned against GLM):
-CONTEXTUAL_MARGIN = 0.05 cosine; CONTEXTUAL_FLOOR = 0.50 cosine;
-MAX_EXPRESSION_TOKENS = 8.
+Operational pilot rules (frozen constants, explicitly developmental,
+not tuned against GLM): CONTEXTUAL_MARGIN = 0.05 cosine;
+CONTEXTUAL_FLOOR = 0.50 cosine; MAX_EXPRESSION_TOKENS = 8.
 """
 
 from __future__ import annotations
@@ -54,7 +65,7 @@ from hp_corpus.deterministic_tuples import (
 )
 from hp_corpus.machine_preannotation import MACHINE_TUPLE_COLUMNS, project_source_cells
 
-CONSTITUENT_METHOD_ID = "eflomal-stanza-contextual-v1"
+CONSTITUENT_METHOD_ID = "eflomal-stanza-contextual-v2"
 
 # Frozen operational pilot rules (reported, not tuned on GLM output).
 CONTEXTUAL_MARGIN = 0.05
@@ -63,13 +74,22 @@ MAX_EXPRESSION_TOKENS = 8
 
 ROUTE_STATES = (
     "nominal_counterpart",
-    "non_nominal_counterpart",
+    "alternate_referential_form",
+    "non_nominal_realization",
     "ambiguous_multiple",
     "unresolved",
-    "omission_candidate",
-    "not_aligned",
+    "no_overt_candidate",
+    "retrieval_not_aligned",
+    "no_anchor_context_available",
 )
-EVIDENCE_KINDS = ("both", "eflomal_only", "contextual_only", "none")
+EVIDENCE_KINDS = (
+    "both",
+    "disagreement",
+    "contextual_supported",
+    "contextual_no_anchor",
+    "none",
+)
+_VERBAL_UPOS = frozenset({"VERB", "AUX"})
 
 # Dependency relations that belong to the nominal expression, per
 # language. The external adposition (``case``) is deliberately absent.
@@ -207,39 +227,70 @@ def eflomal_supported_indices(
     }
 
 
+def verbal_realization_evidence(
+    pp_slice: range,
+    fwd: set[tuple[int, int]],
+    rev: set[tuple[int, int]],
+    tgt_layout: SideLayout,
+) -> bool:
+    """Positive evidence that the PP was realized verbally/clausally:
+    consensus links from the PP exist and every linked target token is
+    a verb/auxiliary. Narrow by design — links on anything else
+    (nominals, punctuation, mixed) are not positive evidence."""
+    intersect = intersection_links(fwd, rev)
+    linked = [t for (s, t) in intersect if s in pp_slice]
+    if not linked:
+        return False
+    return all(
+        0 <= t < len(tgt_layout.tokens) and tgt_layout.tokens[t].upos in _VERBAL_UPOS
+        for t in linked
+    )
+
+
+def classify_locus(
+    anchor_ids: list[str],
+    provenance: str,
+    record_found: bool,
+    context_ids: list[str],
+) -> str:
+    """Separate bad retrieval from a missing strict alignment anchor.
+
+    Returns ``"reliable"`` / ``"retrieval_not_aligned"`` /
+    ``"no_anchor_context_available"``:
+
+    * ``retrieval_not_aligned`` — the supplied context itself is
+      unreliable as the translation locus (manual_review: the reviewed
+      true locus lies outside it), or nothing usable exists at all;
+    * ``no_anchor_context_available`` — the strict DP record is absent
+      so eflomal evidence cannot be computed, but the bounded
+      production retrieval context exists and stays inspectable;
+    * ``reliable`` — strict record present, normal two-signal routing.
+    """
+    if provenance == "manual_review":
+        return "retrieval_not_aligned"
+    if not anchor_ids or not record_found:
+        if context_ids:
+            return "no_anchor_context_available"
+        return "retrieval_not_aligned"
+    return "reliable"
+
+
 @dataclass
 class RouteResult:
     state: str
     chosen: Candidate | None = None
-    evidence: str = "none"  # both | eflomal_only | contextual_only | none
+    evidence: str = "none"
     contextual_margin: float | None = None
     reason: str = ""
 
 
-def route_side(
-    candidates: list[Candidate],
-    supported: set[int],
-    contextual_sim: dict[int, float],
-    *,
-    locus_reliable: bool,
-) -> RouteResult:
-    """Agreement-based routing of one language side.
+def _state_for(cand: Candidate) -> str:
+    if cand.category in ("pronoun", "proper_name"):
+        return "alternate_referential_form"
+    return "nominal_counterpart"
 
-    ``contextual_sim`` maps candidate index → cosine similarity with
-    the German PP (an independent signal; injected so the policy is a
-    pure, testable function). High confidence requires eflomal and the
-    contextual ranking to agree; single-signal choices stay marked as
-    such (lower confidence); genuine disagreement or a too-close top-2
-    is ``ambiguous_multiple``; positive absence of any plausible
-    realization on a reliable locus is ``omission_candidate`` — never a
-    final ``omitted``.
-    """
-    if not locus_reliable:
-        return RouteResult("not_aligned", reason="unreliable_locus")
 
-    if not candidates:
-        return RouteResult("omission_candidate", reason="no_referential_candidate")
-
+def _ranked(contextual_sim: dict[int, float]):
     ranked = sorted(contextual_sim.items(), key=lambda kv: -kv[1])
     top1_idx, top1_sim = ranked[0] if ranked else (None, None)
     top2_sim = ranked[1][1] if len(ranked) > 1 else None
@@ -250,15 +301,49 @@ def route_side(
     )
     clear = margin is None or margin >= CONTEXTUAL_MARGIN
     plausible = top1_sim is not None and top1_sim >= CONTEXTUAL_FLOOR
+    return top1_idx, clear, plausible
+
+
+def route_side(
+    candidates: list[Candidate],
+    supported: set[int],
+    contextual_sim: dict[int, float],
+    *,
+    locus_reliable: bool,
+    verbal_links_only: bool = False,
+) -> RouteResult:
+    """Agreement-based routing of one language side with a strict
+    alignment record available.
+
+    ``contextual_sim`` maps candidate index → cosine similarity with
+    the German PP (LaBSE contextual candidate similarity — an
+    independent, not-yet-human-validated signal; injected so the policy
+    is a pure, testable function). High confidence requires eflomal and
+    the contextual ranking to agree; single-signal or disagreeing
+    choices stay marked as such (lower confidence); genuine
+    disagreement or a too-close top-2 is ``ambiguous_multiple``;
+    positive absence of any plausible overt candidate on a reliable
+    locus is ``no_overt_candidate`` — never a final ``omitted``.
+    """
+    if not locus_reliable:
+        return RouteResult("retrieval_not_aligned", reason="unreliable_locus")
+
+    if not candidates:
+        return RouteResult("no_overt_candidate", reason="no_referential_candidate")
+
+    top1_idx, clear, plausible = _ranked(contextual_sim)
+    ranked = sorted(contextual_sim.items(), key=lambda kv: -kv[1])
+    margin = (
+        round(ranked[0][1] - ranked[1][1], 4) if len(ranked) > 1 else None
+    )
 
     def choose(idx: int, evidence: str) -> RouteResult:
-        cand = candidates[idx]
-        state = (
-            "non_nominal_counterpart"
-            if cand.category in ("pronoun", "proper_name")
-            else "nominal_counterpart"
+        return RouteResult(
+            _state_for(candidates[idx]),
+            chosen=candidates[idx],
+            evidence=evidence,
+            contextual_margin=margin,
         )
-        return RouteResult(state, chosen=cand, evidence=evidence, contextual_margin=margin)
 
     if supported:
         if top1_idx is not None and top1_idx in supported:
@@ -266,22 +351,61 @@ def route_side(
             # confidence regardless of margin (eflomal breaks the tie)
             return choose(top1_idx, "both")
         if len(supported) == 1:
-            # eflomal only; contextual prefers another candidate —
-            # keep, but marked single-signal / lower confidence
-            return choose(next(iter(supported)), "eflomal_only")
+            # eflomal supports one candidate; contextual prefers
+            # another — keep, marked as a disagreement (low confidence)
+            return choose(next(iter(supported)), "disagreement")
         # multiple eflomal-supported candidates and contextual prefers
         # a different one: do not force a choice
         return RouteResult("ambiguous_multiple", contextual_margin=margin)
 
-    # no eflomal support at all
+    # no eflomal-supported candidate
+    if verbal_links_only:
+        if clear and plausible:
+            # links say verbal realization, contextual prefers a noun —
+            # genuine conflict, do not resolve
+            return RouteResult("ambiguous_multiple", contextual_margin=margin)
+        return RouteResult("non_nominal_realization", contextual_margin=margin)
     if clear and plausible:
-        return choose(top1_idx, "contextual_only")
+        return choose(top1_idx, "contextual_supported")
     if any(sim >= CONTEXTUAL_FLOOR for sim in contextual_sim.values()):
         # plausible material exists but no signal separates it
         return RouteResult("ambiguous_multiple", contextual_margin=margin)
-    # locus reliable, nothing plausible anywhere — an omission
-    # CANDIDATE, explicitly not a final omitted label
-    return RouteResult("omission_candidate", contextual_margin=margin)
+    # locus reliable, nothing plausible anywhere — machine-observable
+    # absence of an overt candidate; NOT a final omitted label
+    return RouteResult("no_overt_candidate", contextual_margin=margin)
+
+
+def route_no_anchor(
+    candidates: list[Candidate],
+    contextual_sim: dict[int, float],
+) -> RouteResult:
+    """Routing when no strict alignment record exists
+    (``no_anchor_context_available``): the bounded retrieval context
+    still yields parse candidates, and only the LaBSE contextual
+    candidate similarity can rank them. Any choice keeps the
+    ``no_anchor_context_available`` state (the situation label) and is
+    explicitly single-signal / low-confidence fallback material
+    requiring later human/LLM confirmation — never auto-promoted to a
+    high-confidence state. No clear candidate → ``unresolved`` /
+    ``no_overt_candidate``.
+    """
+    if not candidates:
+        return RouteResult(
+            "no_anchor_context_available", reason="no_referential_candidate"
+        )
+    top1_idx, clear, plausible = _ranked(contextual_sim)
+    ranked = sorted(contextual_sim.items(), key=lambda kv: -kv[1])
+    margin = round(ranked[0][1] - ranked[1][1], 4) if len(ranked) > 1 else None
+    if clear and plausible:
+        return RouteResult(
+            "no_anchor_context_available",
+            chosen=candidates[top1_idx],
+            evidence="contextual_no_anchor",
+            contextual_margin=margin,
+        )
+    if any(sim >= CONTEXTUAL_FLOOR for sim in contextual_sim.values()):
+        return RouteResult("unresolved", contextual_margin=margin)
+    return RouteResult("no_overt_candidate", contextual_margin=margin)
 
 
 def form_for_candidate(cand: Candidate, layout: SideLayout, lang: str) -> tuple[str, str]:
@@ -338,7 +462,7 @@ def build_constituent_row(
             row[f"machine_{side}_counterpart"] = ""
             row[f"machine_{side}_paper_form"] = ""
             row[f"machine_{side}_detail_form"] = ""
-            row[f"machine_{side}_status"] = "not_aligned"
+            row[f"machine_{side}_status"] = "retrieval_not_aligned"
             row[f"machine_{side}_evidence"] = "none"
             row[f"machine_{side}_contextual_margin"] = ""
             row[f"machine_{side}_candidate_count"] = "0"
@@ -384,8 +508,11 @@ __all__ = [
     "generate_candidates",
     "nominal_expression_indices",
     "eflomal_supported_indices",
+    "verbal_realization_evidence",
+    "classify_locus",
     "RouteResult",
     "route_side",
+    "route_no_anchor",
     "form_for_candidate",
     "CONSTITUENT_EXTRA_COLUMNS",
     "CONSTITUENT_COLUMNS",

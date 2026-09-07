@@ -1,18 +1,24 @@
-"""One local contextual cross-lingual similarity signal (pilot).
+"""LaBSE contextual candidate similarity (pilot second signal).
 
-The minimal SimAlign equivalent, on the corpus-canonical local encoder
-LaBSE (``models/LaBSE``, already used by the production alignment and
-judge-audited for this corpus — see ``docs/ALIGNMENT_MODEL_DECISION.md``):
-word-level contextual vectors from the frozen encoder (subword
-mean-pooling, exactly SimAlign's representation strategy), cosine
-similarity between the German PP tokens and each target candidate
-span, deterministic on CPU fp32. No fine-tuning, no model zoo, no
-generative API, no GLM Coding Plan usage.
+Status, preserved as a claim boundary:
 
-This is NOT a word aligner — it ranks a small parse-derived candidate
-set inside an already sentence-aligned context. It stays a separate,
-inspectable signal from eflomal (see
-``hp_corpus.constituent_candidates.route_side``).
+  * local (the corpus-canonical LaBSE checkout under ``models/LaBSE``);
+  * non-generative — no LLM/API inference of any kind;
+  * frozen — no fine-tuning, no threshold search;
+  * an **experimental second signal**, not a word aligner.
+
+What was previously validated for this corpus is *sentence-level*
+LaBSE embedding similarity for sentence alignment (judge-audited; see
+``docs/ALIGNMENT_MODEL_DECISION.md``). **Token/span-level candidate
+similarity — what this module computes — is not yet human-validated.**
+It ranks a small parse-derived candidate set inside an already aligned
+or bounded retrieval context: word-level contextual vectors from the
+frozen encoder (subword mean-pooling), cosine similarity between the
+German PP tokens and each target candidate span, deterministic on CPU
+fp32. It stays a separate, inspectable signal from eflomal (see
+``hp_corpus.constituent_candidates.route_side``); where the two
+disagree the routing records the disagreement rather than averaging it
+away.
 """
 
 from __future__ import annotations
