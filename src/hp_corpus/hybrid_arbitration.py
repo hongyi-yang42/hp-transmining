@@ -343,19 +343,32 @@ def recompute_form(tokens: list[Token], lang: str) -> tuple[str, str]:
         return "", ""
     if realization_type(tokens) == "verbal":
         return "other", "non_nominal"
-    paper, detail = english_form(tokens) if lang == "en" else chinese_form(tokens)
+    # Analysis boundary: classify the nominal/reference expression,
+    # never external adpositional/linker material at its edges
+    # (leading 从/in, trailing of/里, edge 的/了 particles).
+    core = list(tokens)
+    while core and (
+        core[0].upos in ("ADP", "PUNCT", "SYM") or core[0].deprel in ("case", "mark", "mark:rel")
+    ):
+        core.pop(0)
+    while core and (
+        core[-1].upos in ("ADP", "PUNCT", "SYM") or core[-1].deprel in ("case", "mark", "mark:rel")
+    ):
+        core.pop()
+    if not core:
+        return "", ""
+    paper, detail = english_form(core) if lang == "en" else chinese_form(core)
     if lang == "zh":
-        if _zh_has_numeral_classifier(tokens):
+        if _zh_has_numeral_classifier(core):
             return "other", "numeral_classifier"
         # the frozen rule fires on any NUM + clf-tagged pair; a
         # non-counting numeral (第-ordinal) is not that construction
         if detail == "numeral_classifier":
             return "bare", ""
-        if detail == "possessive" and not _zh_has_genuine_possessive(tokens):
+        if detail == "possessive" and not _zh_has_genuine_possessive(core):
             return "bare", ""
     if lang == "en" and paper == "bare_singular":
-        stripped = [t for t in tokens if t.upos not in ("ADP", "PUNCT", "SYM")]
-        if stripped and stripped[0].form.lower() in _EN_QUANTIFIER_DETERMINERS:
+        if core[0].form.lower() in _EN_QUANTIFIER_DETERMINERS:
             return "other", "quantifier"
     return paper, detail
 
@@ -604,15 +617,30 @@ def build_hybrid_row(
 # an identifiable nominal/referential expression in the reliable
 # translation locus usable as the counterpart for surface-form
 # comparison? Three states, no translation-shift ontology, and never a
-# final ``omitted`` claim:
+# final ``omitted`` claim. Epistemic boundary (explicit):
+#
+#   * ``comparable_counterpart`` requires an independent signal (local
+#     routing choice, eflomal-supported candidate, or contextual
+#     rank-1 candidate) overlapping the recovered constituent — a
+#     parser NOUN tag alone is not referential evidence;
+#   * ``no_comparable_nominal_counterpart`` requires POSITIVE machine
+#     evidence (verbal-link realization, or the local routing's
+#     reliable-overt-absence state) — parser/candidate failure
+#     (non-nominal POS, no overlapping candidate, failed recovery or
+#     mapping) is NEVER absence, it is ``unresolved``;
+#   * row-level ``machine_tuple_candidate`` is machine-provisional
+#     only; any review-required side downgrades the row to
+#     ``machine_tuple_candidate_review``, and ``analysis_eligible``
+#     semantics are reserved for human-reviewed data.
 
 ELIGIBILITY_STATES = (
-    "comparable_counterpart",  # nominal/referential counterpart identified
-    "no_comparable_nominal_counterpart",  # reliable locus, none identifiable
+    "comparable_counterpart",  # independently supported nominal counterpart
+    "no_comparable_nominal_counterpart",  # only on positive evidence, never parser failure
     "unresolved",  # evidence insufficient; never a linguistic absence
 )
 ROW_ELIGIBILITY_STATES = (
-    "core_tuple_eligible",
+    "machine_tuple_candidate",
+    "machine_tuple_candidate_review",
     "excluded_no_comparable_counterpart",
     "unresolved",
 )
@@ -754,9 +782,23 @@ def recover_containing_constituent(
                 break
             lo -= 1
             extended += 1
-    while lo < hi and positions[lo][2].upos in ("ADP", "PUNCT", "SYM"):
+    # Analysis boundary: external adpositional/localizer material must
+    # not enter the classified expression. Edge tokens that are
+    # adpositions, punctuation, symbols, or clause/linker particles
+    # (mark/case deprels — attributive 的 left over at an edge, aspect
+    # 了/着) are shrunk off at both ends. Localizer material fused INTO
+    # a token (床上) is bounded by the parser's own tokenization and is
+    # documented as such, not split.
+    _edge_shrink = ("ADP", "PUNCT", "SYM", "PART", "SCONJ")
+    while lo < hi and (
+        positions[lo][2].upos in _edge_shrink
+        or positions[lo][2].deprel in ("case", "mark", "mark:rel")
+    ):
         lo += 1
-    while hi > lo and positions[hi][2].upos in ("ADP", "PUNCT", "SYM"):
+    while hi > lo and (
+        positions[hi][2].upos in _edge_shrink
+        or positions[hi][2].deprel in ("case", "mark", "mark:rel")
+    ):
         hi -= 1
 
     span_text = _exact_substring(
@@ -848,14 +890,20 @@ def eligibility_side(
 
     GLM's span (when present) is a semantic anchor: map it to the locus
     parse, and if it touches a nominal/referential head, the full
-    containing constituent is recovered and classified
-    (``comparable_counterpart``). A non-nominal anchor (verbalized,
-    restructured, or mistagged into VERB/PART by the parser) falls back
-    to the saved candidate set: a defensible overlapping nominal
-    candidate makes the side comparable; none on a reliable locus makes
-    it ``no_comparable_nominal_counterpart`` (NOT ``omitted`` — that is
-    a stronger linguistic claim than this workflow makes); a blank GLM
-    proposal defers entirely to the local routing.
+    containing constituent is recovered and classified — but a
+    ``comparable_counterpart`` verdict additionally requires at least
+    one independent signal (the local routing's own choice, an
+    eflomal-supported candidate, or the contextual rank-1 candidate)
+    overlapping the recovered constituent. A parser NOUN tag alone is
+    not referential evidence.
+
+    Epistemic boundary: ``no_comparable_nominal_counterpart`` is only
+    ever asserted on POSITIVE machine evidence (consensus verbal-link
+    realization, or the local routing's own reliable-overt-absence
+    state). Parser or candidate failure — a non-nominal POS on the
+    anchor, no overlapping candidate, failed recovery or mapping —
+    means ``unresolved``, never absence. A blank GLM proposal defers
+    entirely to the local routing on the same terms.
     """
     if facts.locus == "retrieval_not_aligned":
         return EligibilityDecision("unresolved", evidence="unreliable_locus")
@@ -882,6 +930,27 @@ def eligibility_side(
                 and _relation(rec_text, local.chosen_span) in ("exact", "containment")
                 and local.evidence in ("both", "contextual_supported")
             )
+
+            def _overlaps(c: CandidateRef) -> bool:
+                return _relation(rec_text, c.span) in ("exact", "containment")
+
+            supported = (
+                agree
+                or any(c.eflomal and _overlaps(c) for c in candidates)
+                or any(c.ctx_rank == 1 and _overlaps(c) for c in candidates)
+            )
+            if not supported:
+                # A parser NOUN tag alone is not referential evidence:
+                # without any independent signal (local choice, eflomal,
+                # contextual top-1) backing the recovered constituent,
+                # the machine cannot claim comparability
+                return EligibilityDecision(
+                    "unresolved",
+                    counterpart=rec_text,
+                    paper_form=paper,
+                    detail_form=detail,
+                    evidence="anchor_nominal_no_independent_support",
+                )
             return EligibilityDecision(
                 "comparable_counterpart",
                 counterpart=rec_text,
@@ -893,7 +962,7 @@ def eligibility_side(
                 requires_review=not agree,
             )
         cand = best_overlapping_candidate(glm.span, candidates)
-        if cand is not None and facts.layout is not None:
+        if cand is not None and facts.layout is not None and (cand.eflomal or cand.ctx_rank == 1):
             span, paper, detail = _classify_span_on_layout(cand.span, facts.layout, lang)
             if span:
                 return EligibilityDecision(
@@ -903,12 +972,10 @@ def eligibility_side(
                     detail_form=detail,
                     evidence="anchor_non_nominal_candidate_overlap",
                 )
-        if facts.locus == "reliable":
-            return EligibilityDecision(
-                "no_comparable_nominal_counterpart",
-                evidence="anchor_non_nominal_no_candidate",
-            )
-        return EligibilityDecision("unresolved", evidence="anchor_non_nominal_no_anchor")
+        # Parser-side failure only: a non-nominal POS on the anchor and
+        # no supported overlapping candidate is NOT evidence of a
+        # missing counterpart — the machine simply could not see one.
+        return EligibilityDecision("unresolved", evidence="anchor_non_nominal_parser_only")
 
     # GLM blank (omission claim or not_aligned): defer to local routing
     if local.state in ("nominal_counterpart", "alternate_referential_form") and (
@@ -978,18 +1045,27 @@ def build_eligibility_row(
 
 
 def row_eligibility_for(de_valid: bool, decisions: dict[str, EligibilityDecision]) -> str:
-    """Three-way row eligibility: any unresolved side → unresolved
-    (never a linguistic absence); else any non-comparable side →
-    excluded_no_comparable_counterpart; else (DE valid and both target
-    sides comparable) → core_tuple_eligible."""
+    """Machine-provisional row state — never analysis eligibility.
+
+    ``machine_tuple_candidate`` requires DE validity and both target
+    sides ``comparable_counterpart`` with NO side requiring review. Any
+    review-required side downgrades the row to
+    ``machine_tuple_candidate_review`` — an explicitly provisional
+    category that no downstream analysis script may read as
+    analysis-ready. Any unresolved side → ``unresolved`` (never a
+    linguistic absence); else any non-comparable side →
+    ``excluded_no_comparable_counterpart``. ``analysis_eligible``
+    semantics are reserved for human-reviewed data only.
+    """
     if not de_valid:
         return "unresolved"
-    states = [d.eligibility for d in decisions.values()]
-    if any(s == "unresolved" for s in states):
+    if any(d.eligibility == "unresolved" for d in decisions.values()):
         return "unresolved"
-    if any(s == "no_comparable_nominal_counterpart" for s in states):
+    if any(d.eligibility == "no_comparable_nominal_counterpart" for d in decisions.values()):
         return "excluded_no_comparable_counterpart"
-    return "core_tuple_eligible"
+    if any(d.requires_review for d in decisions.values()):
+        return "machine_tuple_candidate_review"
+    return "machine_tuple_candidate"
 
 
 __all__ = [

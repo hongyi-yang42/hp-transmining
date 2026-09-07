@@ -602,6 +602,31 @@ def test_recovery_head_skips_compound_modifier():
     assert recompute_form(rec.tokens, "en") == ("definite", "")
 
 
+def test_recovery_shrinks_edge_linker_particles():
+    # leading attributive 的 left at an edge is external linker
+    # material, not part of the nominal expression
+    tokens = [
+        tok("醒来", "VERB", "root", "0"),
+        tok("的", "SCONJ", "mark:rel", "3"),
+        tok("车流", "NOUN", "nsubj", "1"),
+    ]
+    lay = SideLayout(
+        block_ids=["syn#b001"],
+        block_texts=["醒来的车流"],
+        token_block=[0] * 3,
+        tokens=tokens,
+    )
+    m = map_span_to_tokens(lay, "车流")
+    rec = recover_containing_constituent(m, lay, "zh")
+    span = lay.block_texts[0][rec.start_char : rec.end_char]
+    assert span == "车流"
+
+
+def test_recompute_ignores_trailing_adposition():
+    span = [tok("the", "DET"), tok("sign", "NOUN"), tok("of", "ADP", "case")]
+    assert recompute_form(span, "en") == ("definite", "")
+
+
 def test_recovery_extension_stops_at_sentence_comma():
     tokens = [
         tok("醒来", "VERB", "root", "0"),
@@ -660,7 +685,7 @@ def test_eligibility_anchor_nominal_is_comparable_with_constituent():
     assert not dec.requires_review
 
 
-def test_eligibility_verbal_anchor_without_candidate_not_comparable():
+def test_eligibility_parser_failure_never_proves_absence():
     lay = _en_small_layout()
     m = map_span_to_tokens(lay, "stumbled")
     dec = eligibility_side(
@@ -670,8 +695,65 @@ def test_eligibility_verbal_anchor_without_candidate_not_comparable():
         [],
         "en",
     )
-    assert dec.eligibility == "no_comparable_nominal_counterpart"
-    assert dec.evidence == "anchor_non_nominal_no_candidate"
+    # a non-nominal POS on the anchor with no overlapping candidate is
+    # machine blindness, not evidence of a missing counterpart
+    assert dec.eligibility == "unresolved"
+    assert dec.evidence == "anchor_non_nominal_parser_only"
+    assert dec.requires_review
+
+
+def test_eligibility_anchor_nominal_without_support_unresolved():
+    # a parser NOUN tag alone is not referential evidence: with no
+    # local agreement, eflomal, or contextual-top1 overlap, the
+    # recovered constituent stays unresolved (diagnostics preserved)
+    lay = SideLayout(
+        block_ids=["syn#b001"],
+        block_texts=["she found the compass"],
+        token_block=[0] * 4,
+        tokens=[
+            tok("she", "PRON", "nsubj", "2"),
+            tok("found", "VERB", "root", "0"),
+            tok("the", "DET", "det", "4"),
+            tok("compass", "NOUN", "obj", "2"),
+        ],
+    )
+    m = map_span_to_tokens(lay, "compass")
+    dec = eligibility_side(
+        glm(span="compass"),
+        local(state="ambiguous_multiple"),
+        facts(mapping=m, layout=lay),
+        [],
+        "en",
+    )
+    assert dec.eligibility == "unresolved"
+    assert dec.evidence == "anchor_nominal_no_independent_support"
+    assert dec.counterpart == "the compass"
+    assert dec.paper_form == "definite"
+    assert dec.requires_review
+
+
+def test_eligibility_anchor_nominal_eflomal_support_suffices():
+    lay = SideLayout(
+        block_ids=["syn#b001"],
+        block_texts=["she found the compass"],
+        token_block=[0] * 4,
+        tokens=[
+            tok("she", "PRON", "nsubj", "2"),
+            tok("found", "VERB", "root", "0"),
+            tok("the", "DET", "det", "4"),
+            tok("compass", "NOUN", "obj", "2"),
+        ],
+    )
+    m = map_span_to_tokens(lay, "compass")
+    dec = eligibility_side(
+        glm(span="compass"),
+        local(state="ambiguous_multiple"),
+        facts(mapping=m, layout=lay),
+        [CandidateRef(span="the compass", category="noun", eflomal=True)],
+        "en",
+    )
+    assert dec.eligibility == "comparable_counterpart"
+    assert dec.evidence == "anchor_nominal_recovered"
     assert dec.requires_review
 
 
@@ -805,13 +887,22 @@ def test_eligibility_blank_glm_local_absence_not_comparable():
 # --- eligibility gate: row level + artifact ----------------------------------------------
 
 
-def _dec(state):
-    return EligibilityDecision(eligibility=state)
+def _dec(state, review=True):
+    return EligibilityDecision(eligibility=state, requires_review=review)
 
 
 def test_row_eligibility_priority():
-    both = {"en": _dec("comparable_counterpart"), "zh": _dec("comparable_counterpart")}
-    assert row_eligibility_for(True, both) == "core_tuple_eligible"
+    clean = {
+        "en": _dec("comparable_counterpart", review=False),
+        "zh": _dec("comparable_counterpart", review=False),
+    }
+    assert row_eligibility_for(True, clean) == "machine_tuple_candidate"
+    # any review-required side can never surface as a clean tuple
+    review = {
+        "en": _dec("comparable_counterpart", review=False),
+        "zh": _dec("comparable_counterpart", review=True),
+    }
+    assert row_eligibility_for(True, review) == "machine_tuple_candidate_review"
     excluded = {
         "en": _dec("comparable_counterpart"),
         "zh": _dec("no_comparable_nominal_counterpart"),
@@ -821,7 +912,7 @@ def test_row_eligibility_priority():
     # a linguistic absence
     mixed = {"en": _dec("no_comparable_nominal_counterpart"), "zh": _dec("unresolved")}
     assert row_eligibility_for(True, mixed) == "unresolved"
-    assert row_eligibility_for(False, both) == "unresolved"
+    assert row_eligibility_for(False, clean) == "unresolved"
 
 
 def test_build_eligibility_row_preserves_glm_cells():

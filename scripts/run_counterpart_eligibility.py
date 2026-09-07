@@ -14,12 +14,18 @@ per target side:
 Per side: ``comparable_counterpart`` / ``no_comparable_nominal_counterpart``
 / ``unresolved``. GLM spans are semantic anchors: the full containing
 nominal constituent is recovered from the parse before the form is
-classified. A GLM ``omitted`` claim is never honored as ``omitted``;
-verbalizations and restructurings are simply not nominal counterparts
-for the core table. Row level: ``core_tuple_eligible`` /
-``excluded_no_comparable_counterpart`` / ``unresolved`` — excluded and
-unresolved rows are preserved with reasons (eligibility funnel), never
-deleted.
+classified — but comparability additionally requires an independent
+signal (local choice, eflomal, or contextual top-1) to overlap the
+recovered constituent; a parser NOUN tag alone never suffices, and
+parser/candidate failure never proves absence (those sides are
+``unresolved``). ``no_comparable_nominal_counterpart`` is asserted only
+on positive machine evidence (verbal-link realization or the local
+routing's reliable-overt-absence state). A GLM ``omitted`` claim is
+never honored as ``omitted``. Row level — machine-provisional, never
+analysis eligibility: ``machine_tuple_candidate`` /
+``machine_tuple_candidate_review`` (any review-required side) /
+``excluded_no_comparable_counterpart`` / ``unresolved``; every row is
+preserved with reasons (eligibility funnel), never deleted.
 
 Outputs (gitignored): eligibility CSV + run report with aggregate
 counts only. Machine diagnostics, never claimed accuracy.
@@ -244,10 +250,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         "glm_omission_claims_final_states": {
             s: dict(sorted(v.items())) for s, v in omission_claims.items()
         },
-        "note": "Machine diagnostics, never claimed accuracy. "
-        "no_comparable_nominal_counterpart is NOT an omitted claim; "
-        "unresolved is never a linguistic absence. Excluded rows are "
-        "preserved with reasons for the eligibility funnel.",
+        "note": "Machine diagnostics, never claimed accuracy, and "
+        "machine_tuple_candidate states are machine-provisional only "
+        "(review-required rows are machine_tuple_candidate_review and "
+        "must never be read as analysis-ready; analysis_eligible is "
+        "reserved for human-reviewed data). "
+        "no_comparable_nominal_counterpart is asserted only on positive "
+        "machine evidence, never on parser/candidate failure, and is "
+        "NOT an omitted claim; unresolved is never a linguistic "
+        "absence. Excluded rows are preserved with reasons for the "
+        "eligibility funnel.",
     }
     report_path = args.output.with_name(args.output.stem + "_run_report.json")
     det.write_json(report_path, report)
