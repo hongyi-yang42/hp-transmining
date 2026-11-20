@@ -10,7 +10,7 @@
 | 发行层 | Pottermore 2016 德语电子合集 "Harry Potter: Die Gesamtausgabe (1-7)"，ISBN `978-1-78110-651-8`，2016-12 上架 | OPF `dc:identifier`；外部书目（Pottermore Publishing，Olly Moss 封面，与版权页吻合）；文件名 ISBN 三方一致 |
 | 本地层 | 上述合集的**零售态 EPUB**（EPUB 2，无 DRM），非 calibre←Kindle 转制 | mimetype 首位 + `OEBPS/content.opf` + `toc.ncx` 自足结构；资产名全带 PTMR 水印；Pottermore 家族样式表；iBooks display-options；内嵌时间戳全 2016-11-03 |
 
-- 本地文件 `data/raw/Harry Potter_ Die Gesamtausgabe (1-7) (German Edition) -- …isbn13 9781781106518.epub`（5,863,548 B）。
+- 本地文件 `data/raw/hp_de_2016_pottermore_1-7.epub`（5,863,548 B）。获取时原始长文件名（含 `isbn13 9781781106518`）记于本地完整报告；改名后 SHA 复验一致（仓例同 EN 2015 件）。
 - 唯一非零售痕迹：`META-INF/calibre_bookmarks.txt` 阅读器残留（OPF 无 calibre 转制元数据）→ 判定零售 Pottermore EPUB（或经 calibre 一次性重打包）；对 2016 发行原件的逐字保真 UNVERIFIED。
 - **与 EN/ZH 两件获取链不同**（那两件是 calibre←Kindle 转制）；三件版本声明粒度对齐但链路如实分开记录。
 - OPF `dc:language` 标为 `nl` —— **元数据缺陷**（内容为德语，§3 内文证据否决该信号）。
