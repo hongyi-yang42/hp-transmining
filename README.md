@@ -18,6 +18,7 @@ Translation mining extracts grammatical categories (here: definiteness) from par
 hp-corpus validate                              # SHA-256 + page-count + text-layer checks
 hp-corpus run       --config config/hp1_*.yaml  # render → ocr → clean → segment
 hp-corpus parse     --config config/hp1_*.yaml  # → CoNLL-U (Stanza)
+uv run python scripts/normalize_conllu_mwt.py --input data/parsed/hp1_de_ch01.conllu --output data/parsed/hp1_de_ch01_nomwt.conllu  # per DE chapter: collapse MWT range lines → *_nomwt.conllu (the extractor's input)
 hp-corpus align     --src … --tgt … --out-name … # cross-language LaBSE + DP alignment
 
 # Extraction & cross-lingual mapping (post-alignment, see scripts/):
