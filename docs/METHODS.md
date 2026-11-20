@@ -6,6 +6,8 @@ This is an **extraction-method reproduction** of Bremmers et al. (2022) *"Transl
 
 A 100% match against the paper's `FILTER_CONTRACTED_123` / `FILTER_PP` is therefore not achievable: residual differences come from parser variation (our Stanza vs the paper's unreported parser) and from edition-specific German PPs in the Carlsen 1998 text that the paper did not annotate.
 
+**Source-edition note.** The paper's "Bibliographical details of the source text and its translations" cites Bloomsbury 1997 (*Harry Potter and the Philosopher's Stone*, UK) for English, Carlsen 1997/98 (trans. Klaus Fritz) for German, and People's Literature Publishing House 2000 (trans. Nong Su) for Mandarin. Our German and Mandarin sources match those citations (Carlsen 1998 first edition; the 2000 Su Nong translation). Our English source is the **Scholastic 1998 US edition** (*Sorcerer's Stone*) — a known deviation from the cited UK edition. It is immaterial to the reproduction: extraction and the 96-item benchmark are German-driven, and the English text serves only as the alignment anchor and annotation target, where UK/US differences are orthographic/lexical and do not interact with definiteness form labels.
+
 ## Parser
 
 - **Paper upstream parser**: not reported in Bremmers et al. (2022).
