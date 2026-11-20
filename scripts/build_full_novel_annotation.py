@@ -1,10 +1,11 @@
 """Build the full-novel (Ch.1-17) annotation master TSV.
 
-Generalises ``scripts/build_ch1_3_full_annotation.py`` past Ch.3. The
-Ch.1-3 builder is methodologically pinned to chapters [1, 2, 3]; this
-script takes its chapter list from the extraction manifest instead, so
-it covers the full novel the moment every requested chapter has been
-extracted AND aligned.
+Generalises the retired Ch.1–3 builder (``build_ch1_3_full_annotation.py``,
+removed 2026-11 — see git history) past Ch.3: that builder was
+methodologically pinned to chapters [1, 2, 3]; this script takes its
+chapter list from the extraction manifest instead, so it covers the
+full novel the moment every requested chapter has been extracted AND
+aligned.
 
 What it emits — same shape and discipline as the Ch.1-3 master:
 

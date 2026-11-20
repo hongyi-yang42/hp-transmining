@@ -1,4 +1,4 @@
-"""Synthetic tests for scripts/migrate_embeddings_v2_to_v3.py.
+"""Synthetic tests for scripts/archive/migrate_embeddings_v2_to_v3.py.
 
 The migration must reuse the already-encoded v2 vectors (no re-encode),
 carry the model fingerprint into the new meta, leave v2 untouched, skip
@@ -16,7 +16,9 @@ import numpy as np
 
 from hp_corpus.align import CACHE_SCHEMA_VERSION, embed_sentences
 
-_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "migrate_embeddings_v2_to_v3.py"
+_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "archive" / "migrate_embeddings_v2_to_v3.py"
+)
 _spec = importlib.util.spec_from_file_location("migrate_embeddings_v2_to_v3", _SCRIPT)
 mig = importlib.util.module_from_spec(_spec)
 assert _spec is not None and _spec.loader is not None

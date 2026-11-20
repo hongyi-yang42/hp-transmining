@@ -11,9 +11,7 @@ Two scripts are involved:
   * `scripts/run_full_novel_german_extraction.py` — paper-faithful PP
     extraction with a per-chapter manifest. The single implementation
     of the paper's extractor (`src/hp_corpus/german_extraction.py`);
-    emits `parse_block_id` + `source_segment_id` per row. The older
-    `run_paper_extractor.py` is a deprecated thin wrapper that
-    delegates here (kept only for invocation compatibility).
+    emits `parse_block_id` + `source_segment_id` per row.
   * `scripts/build_eligible_pool.py` — the formal post-review
     selection path (`src/hp_corpus/sampling.py`). Runs **once** on a
     completed German review. The pool is a **derived** layer: the

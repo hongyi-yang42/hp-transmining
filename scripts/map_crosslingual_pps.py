@@ -1,6 +1,6 @@
 """Generate cross-lingual PP mappings for the 110 author-match contracted DE PPs.
 
-Reads the Step 4 candidate JSONL (already built by build_step4_annotation_pack.py),
+Reads the Step 4 candidate JSONL (built by build_full_novel_annotation.py),
 filters to ``de_form == 'contracted' AND author_resource_match == True`` (110 of
 the 239 candidates), then proposes an EN and ZH equivalent PP for each one
 using ``hp_corpus.crosslingual_map``.

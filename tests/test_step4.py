@@ -8,7 +8,6 @@ in docs/METHODS.md.
 from __future__ import annotations
 
 import csv
-import importlib.util
 import json
 from pathlib import Path
 from typing import Any
@@ -1217,19 +1216,6 @@ def test_build_candidates_fails_on_unresolvable_de_segment_id(tmp_path: Path) ->
             aligned_dir=paths["aligned_dir"],
             chapters=[1],
         )
-
-
-def test_builder_rejects_chapters_outside_1_2_3(tmp_path: Path) -> None:
-    """``--chapters`` other than [1, 2, 3] is rejected at the CLI layer."""
-
-    repo_root = Path(__file__).resolve().parent.parent
-    script_path = repo_root / "scripts" / "build_ch1_3_full_annotation.py"
-    spec = importlib.util.spec_from_file_location("build_ch1_3_full_annotation", script_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    # parser.error() raises SystemExit in argparse.
-    with pytest.raises(SystemExit):
-        mod.main(["--chapters", "1"])
 
 
 def _annotate_row_fully(cols: list[str], row: list[str], *, en_text: str) -> list[str]:

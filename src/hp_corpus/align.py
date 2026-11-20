@@ -47,8 +47,8 @@ _SEGMENT_ID_SCOPE_RE = re.compile(r"^([a-z0-9]+_[a-z]{2,3}_ch\d{2})_p\d{4}_s\d{3
 # caches become invisible to a bumped version (a new subdir is used).
 # v2 → v3: the digest now also covers the model fingerprint, so swapping
 # weights under an unchanged model path invalidates old vectors (migrate
-# existing LaBSE caches with scripts/migrate_embeddings_v2_to_v3.py instead
-# of re-encoding).
+# existing LaBSE caches with scripts/archive/migrate_embeddings_v2_to_v3.py
+# instead of re-encoding).
 CACHE_SCHEMA_VERSION = "v3"
 
 # Records scoring below this stay machine records (method="embedding_dp")

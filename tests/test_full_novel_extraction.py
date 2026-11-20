@@ -864,3 +864,168 @@ def test_chapter_manifest_validates_status():
             hits=[],
             status="bogus",
         )
+
+
+# ---------------------------------------------------------------------------
+# Occurrence coordinates & pp_surface reconstruction (TSV-level). Ported
+# from the retired run_paper_extractor.py wrapper suite before removal.
+# ---------------------------------------------------------------------------
+
+CONLLU_COORDS = """\
+# sent_id = synth_coords_c#b001
+# source_segment_id = synth_coords_c
+# text = im Haus
+1\tim\tim\tADP\tAPPR\t_\t2\tcase\t_\t_
+2\tHaus\tHaus\tNOUN\tNN\t_\t0\troot\t_\t_
+
+# sent_id = synth_coords_u#b001
+# source_segment_id = synth_coords_u
+# text = in dem Wald
+1\tin\tin\tADP\tAPPR\t_\t3\tcase\t_\t_
+2\tdem\tder\tDET\tART\t_\t3\tdet\t_\t_
+3\tWald\tWald\tNOUN\tNN\t_\t0\troot\t_\t_
+"""
+
+CONLLU_TWO_SAME = """\
+# sent_id = synth_two_same#b001
+# source_segment_id = synth_two_same
+# text = im Haus und im Haus
+1\tim\tim\tADP\tAPPR\t_\t2\tcase\t_\t_
+2\tHaus\tHaus\tNOUN\tNN\t_\t0\troot\t_\t_
+3\tund\tund\tCCONJ\tKON\t_\t5\tcc\t_\t_
+4\tim\tim\tADP\tAPPR\t_\t5\tcase\t_\t_
+5\tHaus\tHaus\tNOUN\tNN\t_\t2\tconj\t_\t_
+"""
+
+
+def test_tsv_carries_occurrence_coordinates(tmp_path, cli):
+    """TSV rows carry the token-coordinate + S2 structural columns for
+    both shapes: contracted (no det → ``-`` placeholders) and
+    uncontracted (det metadata propagated from the ART token)."""
+    parsed_dir = tmp_path / "parsed"
+    _write_parsed(parsed_dir, 1, CONLLU_COORDS)
+    out_dir = tmp_path / "out"
+
+    rc = cli.main(
+        [
+            "--chapters",
+            "1",
+            "--parsed-dir",
+            str(parsed_dir),
+            "--output-dir",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+
+    # The header carries the coordinate + S2 structural fields.
+    header = (out_dir / "hp1_de_ch01_contracted.tsv").read_text(
+        encoding="utf-8"
+    ).splitlines()[0]
+    for col in (
+        "parse_block_id",
+        "source_segment_id",
+        "prep_token_id",
+        "det_token_id",
+        "noun_token_id",
+        "pp_token_start",
+        "pp_token_end",
+        "pp_surface",
+        "det_xpos",
+        "det_deprel",
+    ):
+        assert col in header
+
+    c_rows = _read_tsv(out_dir / "hp1_de_ch01_contracted.tsv")
+    assert len(c_rows) == 1
+    row = c_rows[0]
+    assert row["prep_token_id"] == "1"
+    assert row["noun_token_id"] == "2"
+    assert row["det_token_id"] == "-"  # contracted → no det token
+    assert row["det_xpos"] == "-"
+    assert row["det_deprel"] == "-"
+    assert row["pp_token_start"] == "1"
+    assert row["pp_token_end"] == "2"
+    assert row["pp_surface"] == "im Haus"
+
+    u_rows = _read_tsv(out_dir / "hp1_de_ch01_uncontracted.tsv")
+    assert len(u_rows) == 1
+    row = u_rows[0]
+    assert row["prep_token_id"] == "1"
+    assert row["det_token_id"] == "2"
+    assert row["noun_token_id"] == "3"
+    # S2 structural metadata propagated from the det token (line 2:
+    # dem / der / DET / ART / _ / 3 / det).
+    assert row["det_xpos"] == "ART"
+    assert row["det_deprel"] == "det"
+    assert row["pp_token_start"] == "1"
+    assert row["pp_token_end"] == "3"
+    assert row["pp_surface"] == "in dem Wald"
+
+
+def test_two_occurrences_same_prep_noun_are_distinguishable(tmp_path, cli):
+    """Two occurrences of (im, Haus) within one block must remain separate
+    rows with different token coordinates — the extractor must NOT
+    deduplicate."""
+    parsed_dir = tmp_path / "parsed"
+    _write_parsed(parsed_dir, 1, CONLLU_TWO_SAME)
+    out_dir = tmp_path / "out"
+
+    rc = cli.main(
+        [
+            "--chapters",
+            "1",
+            "--parsed-dir",
+            str(parsed_dir),
+            "--output-dir",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+
+    rows = _read_tsv(out_dir / "hp1_de_ch01_contracted.tsv")
+    assert len(rows) == 2, f"expected 2 occurrences, got {len(rows)}"
+    # Same (prep, noun, parse_block_id) but different coordinates.
+    assert rows[0]["parse_block_id"] == rows[1]["parse_block_id"]
+    assert rows[0]["prep"] == rows[1]["prep"] == "im"
+    assert rows[0]["noun"] == rows[1]["noun"] == "Haus"
+    coords = {(r["prep_token_id"], r["noun_token_id"]) for r in rows}
+    assert coords == {("1", "2"), ("4", "5")}, coords
+    # Both surfaces reconstruct correctly from their own ranges.
+    assert {r["pp_surface"] for r in rows} == {"im Haus"}
+
+
+def test_pp_surface_spans_intervening_tokens(tmp_path, cli):
+    """pp_surface must reconstruct from the inclusive token range even
+    when tokens sit between prep and noun (e.g. an adjective the
+    extractor doesn't track)."""
+    conllu = (
+        "# sent_id = synth_with_adj#b001\n"
+        "# source_segment_id = synth_with_adj\n"
+        "# text = im großen Haus\n"
+        "1\tim\tim\tADP\tAPPR\t_\t3\tcase\t_\t_\n"
+        "2\tgroßen\tgroß\tADJ\tADJA\t_\t3\tamod\t_\t_\n"
+        "3\tHaus\tHaus\tNOUN\tNN\t_\t0\troot\t_\t_\n"
+    )
+    parsed_dir = tmp_path / "parsed"
+    _write_parsed(parsed_dir, 1, conllu)
+    out_dir = tmp_path / "out"
+
+    rc = cli.main(
+        [
+            "--chapters",
+            "1",
+            "--parsed-dir",
+            str(parsed_dir),
+            "--output-dir",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+
+    rows = _read_tsv(out_dir / "hp1_de_ch01_contracted.tsv")
+    assert len(rows) == 1
+    # pp_token_start=1, pp_token_end=3 → surface spans all 3 tokens.
+    assert rows[0]["pp_token_start"] == "1"
+    assert rows[0]["pp_token_end"] == "3"
+    assert rows[0]["pp_surface"] == "im großen Haus"

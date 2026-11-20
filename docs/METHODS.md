@@ -13,7 +13,7 @@ A 100% match against the paper's `FILTER_CONTRACTED_123` / `FILTER_PP` is theref
 
 ## Extraction logic (Step 1–3)
 
-`scripts/run_full_novel_german_extraction.py` (backed by `src/hp_corpus/german_extraction.py`) follows the paper's `time-in-translation/conll-extractor` (vendored at `vendor/conll-extractor/`, gitignored). The older `scripts/run_paper_extractor.py` is a deprecated thin wrapper that delegates to it:
+`scripts/run_full_novel_german_extraction.py` (backed by `src/hp_corpus/german_extraction.py`) follows the paper's `time-in-translation/conll-extractor` (vendored at `vendor/conll-extractor/`, gitignored):
 
 - **Contracted PPs**: tokens in `CONTRACTED` (`im`, `am`, `zum`, …) → extract `(prep, noun)` where the prep's head is an `NN`.
 - **Uncontracted PPs**: `PREPOSITIONS` tokens whose same-head dependent is an `ART` in `DETERMINERS` (`der`/`dem`/`den`/…) → extract `(prep, det, noun)`.
@@ -63,9 +63,7 @@ The full-novel builder takes its chapter list from the extraction manifest (`dat
 
 The annotator-facing surface is the trilingual pair CSV built from the
 machine master — see [`ANNOTATION_CSV.md`](./ANNOTATION_CSV.md) and
-[`FULL_NOVEL_SAMPLING.md`](./FULL_NOVEL_SAMPLING.md). The older Ch.1–3
-10+10 pilot selector (`scripts/build_step4_annotation_pack.py`) remains
-available for method piloting but is not the production path.
+[`FULL_NOVEL_SAMPLING.md`](./FULL_NOVEL_SAMPLING.md).
 
 ### Alignment record schema
 
@@ -88,6 +86,6 @@ trilingual pair CSV (column-by-column guide and vocabularies).
 
 Per-PP detail goes only to TSV files under `data/extracted/` (gitignored). The machine master and annotation CSV go to `data/derived/` (also gitignored — contains novel text). **Stdout and summary JSON carry aggregate counts only** — never noun lemmas, surface forms, segment IDs, or sentence text. This is verified by:
 
-- `tests/test_run_paper_extractor.py` — extractor stdout guard.
+- `tests/test_full_novel_extraction.py` — extractor stdout guard + occurrence-coordinate/pp_surface guards.
 - `tests/test_step4.py::test_summary_no_token_text` — Step 4 summary guard.
 - `tests/test_annotation_csv.py` / `tests/test_annotation_csv_validation.py` — annotation-CSV builder/validator stdout guards.

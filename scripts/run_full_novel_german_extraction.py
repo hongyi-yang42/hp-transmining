@@ -2,8 +2,8 @@
 
 The single implementation of the paper's extractor (see
 :func:`hp_corpus.german_extraction.extract_chapter`). It replaced the
-original Ch.1–3 ``scripts/run_paper_extractor.py``, which had two
-full-novel blockers:
+original Ch.1–3 extractor (``run_paper_extractor.py``, removed 2026-11 —
+see git history), which had two full-novel blockers:
 
 1. **Filename bug**: the format string ``f"hp1_de_ch0{ch}_nomwt.conllu"``
    produced ``hp1_de_ch010_nomwt.conllu`` for ``ch >= 10`` instead of

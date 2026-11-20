@@ -2,9 +2,9 @@
 
 This module is the **single implementation** of the paper's
 ``time-in-translation/conll-extractor`` logic (verbatim algorithm in
-:func:`extract_chapter`). The original standalone Ch.1–3 script
-``scripts/run_paper_extractor.py`` was replaced by it and is now a
-deprecated thin wrapper around ``run_full_novel_german_extraction.py``.
+:func:`extract_chapter`). It superseded the original standalone Ch.1–3
+script ``run_paper_extractor.py`` (which had degenerated into a thin
+wrapper around the full-novel CLI; removed 2026-11 — see git history).
 What this module provides over the legacy script:
 
 * **Path bug fix** — input/output paths use ``f"hp1_de_ch{chapter:02d}_..."``
